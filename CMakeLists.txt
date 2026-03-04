@@ -15,6 +15,7 @@ add_executable(main
 src/main.cpp
 src/ui/ui.cpp
 src/ui/MainWindow/MainWindow.cpp
+src/ui/ThreatCard/ThreatCard.cpp
 )
 
 target_link_libraries(main

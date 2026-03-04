@@ -2,5 +2,18 @@
 
 #include <QMainWindow>
 
+class QPushButton;
 
-// implementation to be done. This is the header file to declare all elements within MainWindow class. 
+class MainWindow : public QMainWindow
+{
+    Q_OBJECT
+
+public:
+    explicit MainWindow(QWidget *parent = nullptr);
+
+private slots:
+    void onSimulateThreatClicked();
+
+private:
+    QPushButton* simulateThreatButton;
+};
