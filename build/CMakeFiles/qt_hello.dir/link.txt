@@ -1,1 +1,0 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/qt_hello.dir/link.d CMakeFiles/qt_hello.dir/src/main.cpp.o -o qt_hello  /usr/lib/libQt6Widgets.so.6.10.2 /usr/lib/libQt6Gui.so.6.10.2 /usr/lib/libGLX.so /usr/lib/libOpenGL.so /usr/lib/libQt6Core.so.6.10.2
