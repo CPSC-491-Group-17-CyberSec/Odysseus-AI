@@ -1,0 +1,3 @@
+/home/yazan/Desktop/Languages/C++/Odysseus-AI/build/CMakeFiles/qt_hello.dir
+/home/yazan/Desktop/Languages/C++/Odysseus-AI/build/CMakeFiles/edit_cache.dir
+/home/yazan/Desktop/Languages/C++/Odysseus-AI/build/CMakeFiles/rebuild_cache.dir
