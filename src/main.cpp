@@ -1,13 +1,11 @@
-#include <QApplication>                                                                                                                                                                                                              
-#include <QLabel>                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                     
-int main(int argc, char *argv[]) {                                                                                                                                                                                                   
-    QApplication app(argc, argv);                                                                                                                                                                                                    
-                                                                                                                                                                                                                                     
-    QLabel label("Hello, Qt on Linux!");                                                                                                                                                                                             
-    label.setWindowTitle("Qt Hello");                                                                                                                                                                                                
-    label.resize(360, 120);                                                                                                                                                                                                          
-    label.show();                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                     
-    return app.exec();                                                                                                                                                                                                               
-}    
+#include <QApplication>
+#include <QLabel>
+#include "ui/ui.h"
+#include "ui/MainWindow/MainWindow.h"
+int main(int argc, char *argv[])
+{
+    QApplication app(argc, argv);
+    MainWindow w;
+    w.show();
+    return app.exec();
+}
