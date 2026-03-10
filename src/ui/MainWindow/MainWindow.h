@@ -13,7 +13,9 @@ public:
 
 private slots:
     void onSimulateThreatClicked();
+    void onSimulateFileScan();
 
 private:
     QPushButton* simulateThreatButton;
+    QPushButton* simulateFileScan;
 };

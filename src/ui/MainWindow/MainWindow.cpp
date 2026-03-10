@@ -1,6 +1,6 @@
 #include "MainWindow.h"
 #include "../ThreatCard/ThreatCard.h"
-
+#include "../../core/FileScanner.h"
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -15,16 +15,25 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(central);
 
     auto* layout = new QVBoxLayout(central);
-
+    simulateFileScan = new QPushButton("File scan", central);
     simulateThreatButton = new QPushButton("Simulate Threat Detection", central);
     layout->addWidget(simulateThreatButton);
+    layout->addWidget(simulateFileScan);
 
     // stretch so button stays at top
     layout->addStretch(1);
 
     connect(simulateThreatButton, &QPushButton::clicked,
             this, &MainWindow::onSimulateThreatClicked);
+    connect(simulateFileScan, &QPushButton::clicked, this, &MainWindow::onSimulateFileScan);
 }
+
+
+void MainWindow::onSimulateFileScan()
+{
+    FileScan("/home");
+}
+
 
 void MainWindow::onSimulateThreatClicked()
 {
