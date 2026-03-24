@@ -5,6 +5,7 @@
 #include <QVector>
 
 #include "../../core/FileScanner.h"   // for SuspiciousFile, ScanRecord
+#include "../ScanTypeOverlay/ScanTypeOverlay.h"
 
 class QPushButton;
 class QTableWidget;
@@ -40,10 +41,12 @@ private slots:
 
     // ---- Scan ----
     void onRunScanClicked();
+    void onFullScanRequested();
+    void onPartialScanRequested(const QString& path);
     void onScanningPath(const QString& path);
     void onProgressUpdated(int percent);
     void onSuspiciousFileFound(const SuspiciousFile& file);
-    void onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds);
+    void onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
     void onScanError(const QString& message);
     void onCloseScanResultsClicked();
     void onScanTimerTick();
@@ -72,6 +75,7 @@ private:
     void addThreatEntry(const QString& severity, const QString& name,
                         const QString& vendor,   const QString& date,
                         const QString& status);
+    void startScanForPath(const QString& rootPath);
 
     // Inserts a row into threatTable for a scan finding (with CVE if found)
     void addScanFindingToTable(const SuspiciousFile& sf);
@@ -81,6 +85,9 @@ private:
 
     // Format elapsed seconds as MM:SS
     static QString formatElapsed(int secs);
+
+    // Resize overlay when the window resizes
+    void resizeEvent(QResizeEvent* event) override;
 
     // Populate historyDetailPanel from a ScanRecord
     void showHistoryDetail(const ScanRecord& record);
@@ -109,6 +116,7 @@ private:
     QLabel*       scanPathLabel;
     QProgressBar* scanProgressBar;
     QLabel*       scanElapsedLabel;
+    QLabel*       scanStorageLabel;
     QListWidget*  scanResultsList;
     QLabel*       scanSummaryLabel;
     QPushButton*  closeScanButton;
@@ -130,6 +138,10 @@ private:
     QPushButton* closeHistoryDetailButton;
 
     // -----------------------------------------------------------------------
+    // Scan-type selection overlay
+    // -----------------------------------------------------------------------
+    ScanTypeOverlay*        m_scanOverlay   = nullptr;
+
     // Scanner engine
     // -----------------------------------------------------------------------
     FileScanner*            m_scanner       = nullptr;
@@ -138,8 +150,9 @@ private:
     ActivePanel             m_activePanel   = ActivePanel::None;
 
     // Scan timer
-    QTimer* m_scanTimer      = nullptr;
-    int     m_elapsedSeconds = 0;
+    QTimer* m_scanTimer       = nullptr;
+    int     m_elapsedSeconds  = 0;
+    qint64  m_driveTotalBytes = 0;
 
     // CVE lookup
     QNetworkAccessManager*  m_nam           = nullptr;

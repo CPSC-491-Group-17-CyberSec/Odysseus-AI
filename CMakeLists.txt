@@ -15,6 +15,7 @@ add_executable(main
     src/ui/ui.cpp
     src/ui/MainWindow/MainWindow.cpp
     src/ui/ThreatCard/ThreatCard.cpp
+    src/ui/ScanTypeOverlay/ScanTypeOverlay.cpp
     src/core/FileScanner.cpp
 )
 

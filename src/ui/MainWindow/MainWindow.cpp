@@ -33,6 +33,8 @@
 #include <QDateTime>
 #include <QFont>
 #include <QBrush>
+#include <QStorageInfo>
+#include <QResizeEvent>
 
 // ============================================================================
 // Helpers
@@ -42,6 +44,15 @@ QString MainWindow::formatElapsed(int secs)
     return QString("%1:%2")
         .arg(secs / 60, 2, 10, QChar('0'))
         .arg(secs % 60, 2, 10, QChar('0'));
+}
+
+static QString formatBytes(qint64 bytes)
+{
+    if (bytes >= 1LL << 30)
+        return QString::number(bytes / double(1LL << 30), 'f', 1) + " GB";
+    if (bytes >= 1LL << 20)
+        return QString::number(bytes / double(1LL << 20), 'f', 1) + " MB";
+    return QString::number(bytes / double(1LL << 10), 'f', 1) + " KB";
 }
 
 // ============================================================================
@@ -54,7 +65,6 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1100, 680);
 
     setupUi();
-    loadTestData();
 
     // Existing connections
     connect(runScanButton,  &QPushButton::clicked,
@@ -65,6 +75,13 @@ MainWindow::MainWindow(QWidget *parent)
             this,           &MainWindow::onFilterOrSearchChanged);
     connect(severityFilter, &QComboBox::currentTextChanged,
             this,           &MainWindow::onFilterOrSearchChanged);
+
+    // Scan-type overlay (must be created after setupUi so the window has a size)
+    m_scanOverlay = new ScanTypeOverlay(this);
+    connect(m_scanOverlay, &ScanTypeOverlay::fullScanRequested,
+            this,          &MainWindow::onFullScanRequested);
+    connect(m_scanOverlay, &ScanTypeOverlay::partialScanRequested,
+            this,          &MainWindow::onPartialScanRequested);
 
     // Scanner
     m_scanner = new FileScanner(this);
@@ -96,6 +113,13 @@ MainWindow::~MainWindow()
         m_scanner->cancelScan();
 }
 
+void MainWindow::resizeEvent(QResizeEvent* e)
+{
+    QMainWindow::resizeEvent(e);
+    if (m_scanOverlay)
+        m_scanOverlay->setGeometry(rect());
+}
+
 // ============================================================================
 // setupUi
 // ============================================================================
@@ -118,19 +142,16 @@ void MainWindow::setupUi()
     // =========================================================================
     auto* headerLayout = new QHBoxLayout();
 
-    auto* logoLabel = new QLabel("🛡️");
-    logoLabel->setStyleSheet("font-size: 32px; color: #1a1aff;");
+    auto* logoLabel = new QLabel("[ O ]");
+    logoLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #1a1aff; letter-spacing: 2px;");
 
     auto* titleLabel = new QLabel("<b>Odysseus</b> Threat Dashboard");
     titleLabel->setStyleSheet("font-size: 26px; color: #000000;");
 
     auto* headerSpacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
-    auto* userLabel = new QLabel("👤");
-    userLabel->setStyleSheet("font-size: 24px; color: #888; margin-right: 15px;");
-
     // History button
-    historyButton = new QPushButton("🕘 History");
+    historyButton = new QPushButton("History");
     historyButton->setCursor(Qt::PointingHandCursor);
     historyButton->setStyleSheet(
         "QPushButton { background-color: #555; color: white; border-radius: 15px;"
@@ -149,7 +170,6 @@ void MainWindow::setupUi()
     headerLayout->addWidget(logoLabel);
     headerLayout->addWidget(titleLabel);
     headerLayout->addSpacerItem(headerSpacer);
-    headerLayout->addWidget(userLabel);
     headerLayout->addWidget(historyButton);
     headerLayout->addSpacing(10);
     headerLayout->addWidget(runScanButton);
@@ -322,7 +342,7 @@ void MainWindow::setupUi()
     scanLayout->setSpacing(10);
 
     auto* scanHeaderLayout = new QHBoxLayout();
-    auto* scanTitleLabel   = new QLabel("🔍 Scan Results");
+    auto* scanTitleLabel   = new QLabel("Scan Results");
     scanTitleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #000000;");
 
     closeScanButton = new QPushButton("✕");
@@ -362,8 +382,11 @@ void MainWindow::setupUi()
     scanLayout->addWidget(scanProgressBar);
 
     auto* timerRow = new QHBoxLayout();
+    scanStorageLabel = new QLabel("Storage: —");
+    scanStorageLabel->setStyleSheet("font-size: 11px; color: #555;");
     scanElapsedLabel = new QLabel("Elapsed: 00:00");
     scanElapsedLabel->setStyleSheet("font-size: 11px; color: #555;");
+    timerRow->addWidget(scanStorageLabel);
     timerRow->addStretch();
     timerRow->addWidget(scanElapsedLabel);
     scanLayout->addLayout(timerRow);
@@ -403,7 +426,7 @@ void MainWindow::setupUi()
     histLayout->setSpacing(12);
 
     auto* histHeaderRow = new QHBoxLayout();
-    auto* histTitle     = new QLabel("🕘 Scan History");
+    auto* histTitle     = new QLabel("Scan History");
     histTitle->setStyleSheet("font-size: 20px; font-weight: bold;");
 
     closeHistoryButton = new QPushButton("✕");
@@ -536,11 +559,7 @@ void MainWindow::addThreatEntry(const QString& severity, const QString& name,
 
 void MainWindow::loadTestData()
 {
-    addThreatEntry("🔴 Critical", "CVE-2025-1001",    "Microsoft", "3/01/2026", "Active");
-    addThreatEntry("🟡 Medium",   "CVE-2025-2005",    "Cisco",     "2/15/2026", "Analyzing");
-    addThreatEntry("🟢 Low",      "CVE-2025-3002",    "Oracle",    "2/20/2026", "Active");
-    addThreatEntry("🟢 Low",      "CVE-2025-4009",    "Microsoft", "1/12/2026", "Resolved");
-    addThreatEntry("🔴 Critical", "Ransomware.Locky", "Unknown",   "3/10/2026", "Quarantined");
+    // Table is populated by live scan results only
 }
 
 // ============================================================================
@@ -552,29 +571,39 @@ void MainWindow::addScanFindingToTable(const SuspiciousFile& sf)
     int row = threatTable->rowCount();
     threatTable->insertRow(row);
 
-    // Severity column
+    // Severity column – CVE-confirmed score takes precedence; category-derived is fallback
     QString sevText;
-    QString sevLabel;
+    QColor  sevColor;
+    bool    cveConfirmed = !sf.cveSeverity.isEmpty();
+
+    auto scoreStr = [&]() -> QString {
+        return (sf.cveScore > 0.0f)
+            ? QString(" (%1)").arg(double(sf.cveScore), 0, 'f', 1)
+            : QString();
+    };
+
     if (sf.cveSeverity == "CRITICAL") {
-        sevText  = "🔴 Critical"; sevLabel = "Critical";
+        sevText  = "Critical" + scoreStr(); sevColor = QColor("#C62828");
     } else if (sf.cveSeverity == "HIGH") {
-        sevText  = "🟠 High";     sevLabel = "High";
-    } else if (sf.cveSeverity == "MEDIUM" || sf.cveSeverity == "MEDIUM-HIGH") {
-        sevText  = "🟡 Medium";   sevLabel = "Medium";
+        sevText  = "High" + scoreStr();     sevColor = QColor("#E65100");
+    } else if (sf.cveSeverity == "MEDIUM") {
+        sevText  = "Medium" + scoreStr();   sevColor = QColor("#F57F17");
     } else if (sf.cveSeverity == "LOW") {
-        sevText  = "🟢 Low";      sevLabel = "Low";
+        sevText  = "Low" + scoreStr();      sevColor = QColor("#2E7D32");
     } else {
-        // No CVE found – derive from category
+        // No CVE – derive severity from detection category
+        cveConfirmed = false;
         if (sf.category.contains("Known Malware") || sf.category.contains("PE Binary") ||
             sf.category.contains("ELF Binary")    || sf.category.contains("Mach-O")) {
-            sevText = "🔴 Critical";
+            sevText = "Critical"; sevColor = QColor("#C62828");
         } else if (sf.category.contains("High-Risk") || sf.category.contains("Persistence") ||
                    sf.category.contains("Temp")) {
-            sevText = "🟠 High";
+            sevText = "High";     sevColor = QColor("#E65100");
         } else {
-            sevText = "🟡 Medium";
+            sevText = "Medium";   sevColor = QColor("#F57F17");
         }
     }
+    Q_UNUSED(cveConfirmed)
 
     // Name column: CVE ID if we have one, otherwise filename
     QString nameText = sf.cveId.isEmpty() ? sf.fileName : sf.cveId;
@@ -587,16 +616,15 @@ void MainWindow::addScanFindingToTable(const SuspiciousFile& sf)
     QStringList cols = {sevText, nameText, vendorText, dateText, "Detected"};
     for (int i = 0; i < cols.size(); ++i) {
         auto* item = new QTableWidgetItem(cols[i]);
-        item->setForeground(QBrush(Qt::black));
+        item->setForeground(QBrush(i == 0 ? sevColor : Qt::black));
+        if (i == 0) item->setFont(QFont("", -1, QFont::Bold));
         // Store full path in UserRole for the detail popup
-        item->setData(Qt::UserRole, sf.filePath);
+        item->setData(Qt::UserRole,     sf.filePath);
         item->setData(Qt::UserRole + 1, sf.reason);
         item->setData(Qt::UserRole + 2, sf.cveId);
         item->setData(Qt::UserRole + 3, sf.cveSummary);
         threatTable->setItem(row, i, item);
     }
-    if (sevText.contains("Critical"))
-        threatTable->item(row, 0)->setFont(QFont("Arial", 11, QFont::Bold));
 
     threatTable->resizeRowsToContents();
     threatTable->setSortingEnabled(true);
@@ -667,15 +695,14 @@ void MainWindow::onCveLookupReply(QNetworkReply* reply)
                 }
             }
 
-            // CVSS severity
+            // CVSS severity + base score – try v3.1, v3.0, v2 in order
             QJsonObject metrics = cveNode.value("metrics").toObject();
-            // Try CVSSv3.1 first, then v3.0, then v2
             for (const QString& key : {"cvssMetricV31", "cvssMetricV30", "cvssMetricV2"}) {
                 QJsonArray arr = metrics.value(key).toArray();
                 if (!arr.isEmpty()) {
-                    sf.cveSeverity = arr[0].toObject()
-                                         .value("cvssData").toObject()
-                                         .value("baseSeverity").toString().toUpper();
+                    QJsonObject cvssData = arr[0].toObject().value("cvssData").toObject();
+                    sf.cveSeverity = cvssData.value("baseSeverity").toString().toUpper();
+                    sf.cveScore    = float(cvssData.value("baseScore").toDouble(0.0));
                     break;
                 }
             }
@@ -797,6 +824,7 @@ void MainWindow::onSimulateThreatClicked()
 void MainWindow::onRunScanClicked()
 {
     if (m_scanner->isRunning()) {
+        // Cancel the active scan
         m_scanTimer->stop();
         m_scanner->cancelScan();
         runScanButton->setText("Run Scan");
@@ -806,23 +834,44 @@ void MainWindow::onRunScanClicked()
             "QPushButton:hover { background-color: #0000CC; }"
         );
         scanProgressBar->setValue(0);
-        scanStatusLabel->setText("⏹ Scan cancelled.");
+        scanStatusLabel->setText("Scan cancelled.");
         scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #888;");
         scanPathLabel->clear();
         return;
     }
 
+    // Show the scan-type selection overlay
+    m_scanOverlay->showOverlay();
+}
+
+void MainWindow::onFullScanRequested()
+{
+    QString rootPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+    if (rootPath.isEmpty())
+        rootPath = QDir::rootPath();
+    startScanForPath(rootPath);
+}
+
+void MainWindow::onPartialScanRequested(const QString& path)
+{
+    startScanForPath(path);
+}
+
+void MainWindow::startScanForPath(const QString& rootPath)
+{
     // Reset state
     m_findings.clear();
-    m_elapsedSeconds  = 0;
-    m_cveQueryIndex   = 0;
+    m_elapsedSeconds    = 0;
+    m_cveQueryIndex     = 0;
     m_pendingCveQueries = 0;
+    m_driveTotalBytes   = 0;
 
     scanResultsList->clear();
-    scanSummaryLabel->setText("Scanning…");
-    scanStatusLabel->setText("⏳ Scanning in progress…");
+    scanSummaryLabel->setText("Scanning...");
+    scanStatusLabel->setText("Scanning in progress...");
     scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #1A1AEE;");
     scanElapsedLabel->setText("Elapsed: 00:00");
+    scanStorageLabel->setText("Storage: —");
     scanPathLabel->clear();
     scanProgressBar->setValue(0);
 
@@ -835,12 +884,14 @@ void MainWindow::onRunScanClicked()
         "QPushButton:hover { background-color: #AA1100; }"
     );
 
-    qDebug() << "=== Odysseus File Scan Started ===";
+    qDebug() << "=== Odysseus File Scan Started ===" << rootPath;
     m_scanTimer->start();
 
-    QString rootPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
-    if (rootPath.isEmpty())
-        rootPath = QDir::rootPath();
+    // Capture total capacity of the drive being scanned
+    QStorageInfo si(rootPath);
+    m_driveTotalBytes = si.bytesTotal();
+    if (m_driveTotalBytes > 0)
+        scanStorageLabel->setText("Storage: 0 B / " + formatBytes(m_driveTotalBytes));
 
     m_scanner->startScan(rootPath);
 }
@@ -875,24 +926,24 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
              << "|" << file.reason;
 
     // Colour-code in scan panel list
-    QString icon = "⚠️";
-    QColor  bg   = QColor("#FFF8E1");
+    QString prefix = "[!]";
+    QColor  bg     = QColor("#FFF8E1");
     if (file.category.contains("Known Malware") || file.category.contains("PE Binary") ||
         file.category.contains("ELF Binary")    || file.category.contains("Mach-O")) {
-        icon = "🔴"; bg = QColor("#FDECEA");
+        prefix = "[CRIT]"; bg = QColor("#FDECEA");
     } else if (file.category.contains("High-Risk") || file.category.contains("Persistence") ||
                file.category.contains("Temp")) {
-        icon = "🟠"; bg = QColor("#FFF3E0");
+        prefix = "[HIGH]"; bg = QColor("#FFF3E0");
     } else if (file.category.contains("Suspicious Name") || file.category.contains("Double-Extension")) {
-        icon = "🟡"; bg = QColor("#FFFDE7");
+        prefix = "[MED]";  bg = QColor("#FFFDE7");
     }
 
-    QString displayText = QString("%1 %2\n   %3\n   📁 %4")
-        .arg(icon)
+    QString displayText = QString("%1 %2\n   %3\n   %4")
+        .arg(prefix)
         .arg(file.fileName)
         .arg(file.category)
         .arg(file.filePath.length() > 60
-             ? "…" + file.filePath.right(57)
+             ? "..." + file.filePath.right(57)
              : file.filePath);
 
     auto* item = new QListWidgetItem(displayText, scanResultsList);
@@ -911,7 +962,7 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
     );
 }
 
-void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds)
+void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned)
 {
     m_scanTimer->stop();
 
@@ -926,13 +977,21 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     scanElapsedLabel->setText("Elapsed: " + formatElapsed(elapsedSeconds));
     scanPathLabel->clear();
 
+    // Update storage counter with final scanned bytes vs drive total
+    if (m_driveTotalBytes > 0)
+        scanStorageLabel->setText(
+            "Storage: " + formatBytes(bytesScanned) + " / " + formatBytes(m_driveTotalBytes)
+        );
+    else
+        scanStorageLabel->setText("Storage: " + formatBytes(bytesScanned));
+
     if (suspiciousCount == 0) {
         qDebug() << "Nothing to do";
-        scanStatusLabel->setText("✅ Scan complete — nothing suspicious found.");
+        scanStatusLabel->setText("Scan complete — nothing suspicious found.");
         scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #2E7D32;");
 
         auto* item = new QListWidgetItem(
-            "✅  Nothing to do — no suspicious files detected.", scanResultsList
+            "Nothing to do — no suspicious files detected.", scanResultsList
         );
         item->setForeground(QBrush(QColor("#2E7D32")));
 
@@ -947,12 +1006,12 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
             qDebug() << " " << sf.filePath << "->" << sf.category;
 
         scanStatusLabel->setText(
-            QString("⚠️  Scan complete — %1 suspicious file(s) found.").arg(suspiciousCount)
+            QString("Scan complete — %1 suspicious file(s) found.").arg(suspiciousCount)
         );
         scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #B71C1C;");
 
         scanSummaryLabel->setText(
-            QString("Looking up CVEs for %1 finding(s)…").arg(suspiciousCount)
+            QString("Looking up CVEs for %1 finding(s)...").arg(suspiciousCount)
         );
 
         // Kick off CVE queries (rate-limited: one at a time via m_cveQueryIndex)
@@ -968,19 +1027,7 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     record.suspiciousCount = suspiciousCount;
     record.elapsedSeconds  = elapsedSeconds;
     record.findings        = m_findings;   // snapshot (CVE fields may still be empty, ok)
-    m_history.prepend(record);             // newest first
-
-    // Add entry to history list widget
-    QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
-        .arg(record.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
-        .arg(suspiciousCount)
-        .arg(totalScanned)
-        .arg(formatElapsed(elapsedSeconds));
-
-    auto* hi = new QListWidgetItem(label, historyList);
-    hi->setForeground(QBrush(suspiciousCount > 0 ? QColor("#B71C1C") : QColor("#2E7D32")));
-    historyList->insertItem(0, hi->clone());
-    delete hi;
+    m_history.prepend(record);  // newest first; historyList is rebuilt on demand
 }
 
 void MainWindow::onScanError(const QString& message)
@@ -995,7 +1042,7 @@ void MainWindow::onScanError(const QString& message)
     );
     scanProgressBar->setValue(0);
     qDebug() << "[SCAN ERROR]" << message;
-    scanStatusLabel->setText("❌ Scan error: " + message);
+    scanStatusLabel->setText("Scan error: " + message);
     scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #B71C1C;");
     scanPathLabel->clear();
     scanSummaryLabel->setText("Scan could not complete.");
@@ -1011,11 +1058,29 @@ void MainWindow::onCloseScanResultsClicked()
 // ============================================================================
 void MainWindow::onHistoryClicked()
 {
-    if (historyList->count() == 0 && m_history.isEmpty()) {
+    // Rebuild the list from m_history every time so stale placeholders never
+    // appear alongside real entries after the first scan completes.
+    historyList->clear();
+
+    if (m_history.isEmpty()) {
         auto* placeholder = new QListWidgetItem("No scans have been run yet.");
         placeholder->setForeground(QBrush(QColor("#888")));
         historyList->addItem(placeholder);
+    } else {
+        for (const ScanRecord& r : m_history) {
+            QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
+                .arg(r.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
+                .arg(r.suspiciousCount)
+                .arg(r.totalScanned)
+                .arg(formatElapsed(r.elapsedSeconds));
+            auto* item = new QListWidgetItem(label);
+            item->setForeground(QBrush(
+                r.suspiciousCount > 0 ? QColor("#B71C1C") : QColor("#2E7D32")
+            ));
+            historyList->addItem(item);
+        }
     }
+
     showPanel(ActivePanel::History);
 }
 
@@ -1039,9 +1104,9 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
     );
 
     histDetailSummaryLabel->setText(
-        QString("📂 Files scanned: %1\n"
-                "⚠️  Suspicious files: %2\n"
-                "⏱  Duration: %3")
+        QString("Files scanned: %1\n"
+                "Suspicious files: %2\n"
+                "Duration: %3")
             .arg(record.totalScanned)
             .arg(record.suspiciousCount)
             .arg(formatElapsed(record.elapsedSeconds))
@@ -1050,7 +1115,7 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
     histDetailFilesList->clear();
 
     if (record.findings.isEmpty()) {
-        auto* ok = new QListWidgetItem("✅  Nothing to do — scan was clean.");
+        auto* ok = new QListWidgetItem("Nothing to do — scan was clean.");
         ok->setForeground(QBrush(QColor("#2E7D32")));
         histDetailFilesList->addItem(ok);
     } else {

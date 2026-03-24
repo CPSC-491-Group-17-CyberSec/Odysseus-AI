@@ -7,52 +7,151 @@
 #include <QElapsedTimer>
 #include <QThread>
 #include <QRegularExpression>
+#include <QStorageInfo>
 
 // ============================================================================
-// FileScannerWorker – constructor
+// detectContext  –  static, called before filter lists are built
 // ============================================================================
-FileScannerWorker::FileScannerWorker(const QString& rootPath,
-                                     QAtomicInt*    cancelFlag,
-                                     QObject*       parent)
-    : QObject(parent)
-    , m_rootPath(rootPath)
-    , m_cancelFlag(cancelFlag)
+// static
+ScanContext FileScannerWorker::detectContext(const QString& rootPath)
 {
+    ScanContext ctx;
+
+    // -- Compile-time OS detection --
+#if defined(Q_OS_LINUX)
+    ctx.runningOnLinux   = true;
+#elif defined(Q_OS_WIN)
+    ctx.runningOnWindows = true;
+#elif defined(Q_OS_MACOS)
+    ctx.runningOnMac     = true;
+#endif
+
+    // -- Runtime filesystem detection --
+    QStorageInfo si(rootPath);
+    si.refresh();
+    ctx.fsType     = QString::fromUtf8(si.fileSystemType()).toLower();
+    ctx.isReadOnly = si.isReadOnly();
+
+    // Windows-native formats.
+    // "fuseblk" is used by ntfs-3g on Linux when mounting NTFS drives.
+    static const QVector<QString> windowsFsTypes = {
+        "ntfs", "fat", "fat32", "vfat", "exfat", "refs", "fuseblk"
+    };
+    // Linux-native formats
+    static const QVector<QString> linuxFsTypes = {
+        "ext2", "ext3", "ext4", "btrfs", "xfs", "zfs", "f2fs",
+        "reiserfs", "nilfs2", "tmpfs", "overlayfs", "squashfs",
+        "aufs", "erofs", "bcachefs"
+    };
+    // macOS formats
+    static const QVector<QString> macFsTypes = {
+        "apfs", "hfs", "hfsplus"
+    };
+    // Network / FUSE pseudo-filesystems
+    static const QVector<QString> networkFsTypes = {
+        "nfs", "nfs4", "cifs", "smb", "smb2", "smbfs",
+        "fuse.sshfs", "fuse.gvfsd-fuse", "davfs2", "9p", "virtiofs"
+    };
+
+    ctx.isWindowsFs = windowsFsTypes.contains(ctx.fsType);
+    ctx.isLinuxFs   = linuxFsTypes.contains(ctx.fsType);
+    ctx.isMacFs     = macFsTypes.contains(ctx.fsType);
+    ctx.isNetworkFs = networkFsTypes.contains(ctx.fsType)
+                   || ctx.fsType.startsWith("fuse.");
+
+    // FAT variants are almost always removable media (USB sticks, SD cards)
+    ctx.isRemovable = (ctx.fsType == "vfat"  ||
+                       ctx.fsType == "fat"   ||
+                       ctx.fsType == "fat32" ||
+                       ctx.fsType == "exfat");
+
+    // If QStorageInfo couldn't identify the type, fall back to the host OS
+    if (!ctx.isWindowsFs && !ctx.isLinuxFs && !ctx.isMacFs && !ctx.isNetworkFs) {
+        if (ctx.runningOnWindows)     ctx.isWindowsFs = true;
+        else if (ctx.runningOnMac)    ctx.isMacFs     = true;
+        else                           ctx.isLinuxFs   = true;
+    }
+
+    return ctx;
+}
+
+// ============================================================================
+// buildFilterLists  –  populates all detection lists based on m_ctx
+// ============================================================================
+void FileScannerWorker::buildFilterLists()
+{
+    // Convenience flags
+    const bool winCtx = m_ctx.isWindowsFs
+                     || m_ctx.isRemovable      // removable media can carry Windows payloads
+                     || m_ctx.runningOnWindows;
+    const bool macCtx = m_ctx.isMacFs
+                     || m_ctx.runningOnMac;
+    const bool linCtx = m_ctx.isLinuxFs
+                     || m_ctx.runningOnLinux;
+
     // -----------------------------------------------------------------------
-    // HIGH-RISK extensions – flagged regardless of path unless whitelisted.
-    // Shell scripts (.sh) are intentionally omitted: they are ubiquitous in
-    // package installs, build systems, and dotfile managers.
+    // HIGH-RISK extensions
+    //
+    // PE launchers (.exe .scr .cpl .pif) are always flagged: even on Linux
+    // a stray .exe outside of Wine/Steam paths warrants attention (it shouldn't
+    // be there, and trusted paths already whitelist Wine/Steam directories).
+    //
+    // Windows scripting formats (.bat .cmd .vbs .ps1 …) are only relevant on
+    // Windows or Windows-formatted media; on native Linux/macOS ext4/APFS they
+    // are inert data and would generate constant noise.
     // -----------------------------------------------------------------------
     m_highRiskExtensions = {
-        // Windows executables & loaders
-        "exe", "scr", "cpl", "pif",
-        // Windows scripting / automation
-        "bat", "cmd", "vbs", "vbe", "hta",
-        "ps1", "psm1",
-        // Windows registry & installer formats that can auto-run
-        "reg",
-        // Shortcut files – widely abused as LNK exploits
-        "lnk"
+        "exe", "scr", "cpl", "pif"
     };
 
+    if (winCtx) {
+        m_highRiskExtensions.append({
+            "bat", "cmd",
+            "vbs", "vbe", "hta",
+            "ps1", "psm1",
+            "reg",
+            "lnk"
+        });
+    }
+
     // -----------------------------------------------------------------------
-    // SUSPICIOUS extensions – flagged only OUTSIDE trusted paths.
-    // .dll is here (not high-risk) because virtually every app ships DLLs.
+    // SUSPICIOUS extensions
+    //
+    // Office macro formats are a cross-platform threat (they can be opened on
+    // any OS and phone home or drop payloads via macros).
+    //
+    // Windows-specific formats (dll, script hosts, installers) only apply in
+    // a Windows context.
+    //
+    // .js / .jse are Windows Script Host formats. On a Linux ext4 workstation
+    // JavaScript files are ubiquitous (Node, web dev) and must NOT be flagged.
+    //
+    // .iso / .img are legitimate on Linux (distro ISOs, disk backups) but
+    // suspicious on Windows systems or removable media.
     // -----------------------------------------------------------------------
     m_suspiciousExtensions = {
-        "dll",        // flagged only outside trusted dirs
-        "js", "jse",  // Windows JS scripts
-        "wsf", "wsh",
-        "msi", "msp", "msc",
-        // Office macro-enabled formats
-        "xlsm", "xlsb", "docm", "dotm", "pptm", "ppam",
-        // Disk images used to deliver malware
-        "iso", "img"
+        // Office macro-enabled formats – flagged everywhere
+        "xlsm", "xlsb", "docm", "dotm", "pptm", "ppam"
     };
 
+    if (winCtx) {
+        m_suspiciousExtensions.append({
+            "dll",
+            "js", "jse",        // Windows Script Host JS – NOT web JS
+            "wsf", "wsh",
+            "msi", "msp", "msc"
+        });
+    }
+
+    if (winCtx || macCtx || m_ctx.isRemovable) {
+        // Disk images: suspicious on Windows/macOS/removable but NOT on a
+        // Linux workstation where ISOs are routine downloads.
+        m_suspiciousExtensions.append({ "iso", "img" });
+    }
+
     // -----------------------------------------------------------------------
-    // NAME FRAGMENTS – these are highly specific to known malware tooling.
-    // Intentionally short list to avoid matching legitimate software.
+    // NAME FRAGMENTS – highly specific to known malware tooling.
+    // Intentionally short list; context-independent.
     // -----------------------------------------------------------------------
     m_suspiciousNameFragments = {
         "keylog",
@@ -71,7 +170,8 @@ FileScannerWorker::FileScannerWorker(const QString& rootPath,
     };
 
     // -----------------------------------------------------------------------
-    // KNOWN MALWARE / PUA – exact filename (with or without extension, lowercase)
+    // KNOWN MALWARE / PUA – exact filename (lowercase, with or without ext)
+    // Context-independent: these specific names are always suspicious.
     // -----------------------------------------------------------------------
     m_knownMalwareNames = {
         "autorun.inf",
@@ -92,116 +192,161 @@ FileScannerWorker::FileScannerWorker(const QString& rootPath,
     };
 
     // -----------------------------------------------------------------------
-    // SKIP DIR FRAGMENTS – never descend into these subtrees.
-    // Matched case-insensitively against the lowercase absolute dir path.
+    // SKIP DIR FRAGMENTS
+    // Only load platform-relevant paths to avoid unnecessary string matching.
     // -----------------------------------------------------------------------
+
+    // Universal noise (applies on every platform)
     m_skipDirFragments = {
-        // Linux virtual filesystems
-        "/proc/", "/sys/", "/dev/", "/run/",
-        // macOS virtual / spotlight / TM
-        "/system/library/caches",
-        "/private/var/vm",
-        "/.spotlight-v100",
-        "/.fseventsd",
-        "/.mobilebackups",
-        // Windows heavyweight caches
-        "\\windows\\winsxs",
-        "\\windows\\installer",
-        "\\windows\\softwaredistribution",
-        "\\$recycle.bin",
-        "\\system volume information",
-        // Universal noise
         "/node_modules/",
         "/.git/",
-        // Steam / Proton / Pressure-vessel runtimes
-        // (thousands of legitimate .so/.sh files)
-        "/steamrt",
-        "/steam-runtime",
-        "/steamlinuxruntime",
-        "/pressure-vessel",
-        "/pv-runtime",
-        // Package manager caches
-        "/.cache/pip",
-        "/.cache/yarn",
-        "/.cache/npm",
-        "/.cache/cargo",
-        "/go/pkg/mod/cache",
-        // Trash
         "/.local/share/trash",
         "/.trash"
     };
 
+    if (linCtx) {
+        m_skipDirFragments.append({
+            // Linux virtual filesystems – never real files
+            "/proc/", "/sys/", "/dev/", "/run/",
+            // Steam / Proton runtimes (thousands of legitimate .so/.sh files)
+            "/steamrt", "/steam-runtime",
+            "/steamlinuxruntime",
+            "/pressure-vessel", "/pv-runtime",
+            // Package manager caches
+            "/.cache/pip",
+            "/.cache/yarn",
+            "/.cache/npm",
+            "/.cache/cargo",
+            "/go/pkg/mod/cache"
+        });
+    }
+
+    if (macCtx) {
+        m_skipDirFragments.append({
+            "/system/library/caches",
+            "/private/var/vm",
+            "/.spotlight-v100",
+            "/.fseventsd",
+            "/.mobilebackups"
+        });
+    }
+
+    if (winCtx) {
+        m_skipDirFragments.append({
+            "\\windows\\winsxs",
+            "\\windows\\installer",
+            "\\windows\\softwaredistribution",
+            "\\$recycle.bin",
+            "\\system volume information"
+        });
+    }
+
     // -----------------------------------------------------------------------
     // TRUSTED PATH FRAGMENTS
-    // Files here skip all extension-based checks.
-    // Magic-byte mismatches (e.g. PE inside a .jpg) still fire everywhere.
-    // Matched case-insensitively against lowercase absolute path.
+    // Files here skip all extension checks; magic-byte mismatches still fire.
     // -----------------------------------------------------------------------
+
+    // Universal user-managed toolchains and build artefacts
     m_trustedPathFragments = {
-        // Linux system / package manager directories
-        "/usr/",
-        "/lib/",
-        "/lib32/",
-        "/lib64/",
-        "/libx32/",
-        "/bin/",
-        "/sbin/",
-        "/etc/",
-        "/var/lib/",
-        "/opt/",
-        "/snap/",
-        "/var/lib/flatpak",
-        "/run/host/",
-
-        // macOS system
-        "/system/",
-        "/library/",
-        "/applications/",
-        "/developer/",
-
-        // Windows system
-        "\\windows\\",
-        "\\program files\\",
-        "\\program files (x86)\\",
-        "\\programdata\\",
-        "\\windows\\system32",
-        "\\windows\\syswow64",
-
-        // User-managed toolchains (language version managers, etc.)
-        "/.rustup/",
-        "/.cargo/",
-        "/.pyenv/",
-        "/.rbenv/",
-        "/.nvm/",
-        "/.sdkman/",
-        "/.asdf/",
+        "/.rustup/", "/.cargo/",
+        "/.pyenv/", "/.rbenv/",
+        "/.nvm/", "/.sdkman/", "/.asdf/",
         "/go/pkg/",
-        "/nix/store/",
-
-        // Flatpak & snap user installs
-        "/.local/share/flatpak",
-        "/var/lib/snapd",
-
-        // Steam & gaming – kept broad since the dir-skip covers runtimes
-        "/.steam/",
-        "/.local/share/steam",
-        "/steamapps/",
-
-        // Common IDE / build artefacts
-        "/.local/share/",     // XDG user data – apps legitimately put scripts here
-        "/.config/",          // XDG config – dotfile scripts are expected here
-        "/qt/",
-        "/kde/",
-        "/.gradle/",
-        "/.m2/",
-        "/.conan/",
-        "/cmake-build",
-        "/build/",
-        "/dist/",
-        "/.venv/",
-        "/virtualenv/",
-        "/site-packages/"
+        "/.gradle/", "/.m2/", "/.conan/",
+        "/cmake-build", "/build/", "/dist/",
+        "/.venv/", "/virtualenv/", "/site-packages/"
     };
+
+    if (linCtx) {
+        m_trustedPathFragments.append({
+            // Linux system / package manager trees
+            "/usr/", "/lib/",
+            "/lib32/", "/lib64/", "/libx32/",
+            "/bin/", "/sbin/",
+            "/etc/", "/var/lib/",
+            "/opt/", "/snap/",
+            "/var/lib/flatpak",
+            "/run/host/",
+            "/nix/store/",
+            // Flatpak & snap user installs
+            "/.local/share/flatpak",
+            "/var/lib/snapd",
+            // Steam & gaming
+            "/.steam/",
+            "/.local/share/steam",
+            "/steamapps/",
+            // Wine prefixes – contain legitimate Windows DLLs / EXEs
+            "/.wine/",
+            // XDG user data & config dirs (apps legitimately place scripts here)
+            "/.local/share/",
+            "/.local/bin/",
+            "/.config/",
+            // Common IDE paths
+            "/qt/", "/kde/"
+        });
+    }
+
+    if (macCtx) {
+        m_trustedPathFragments.append({
+            "/system/", "/library/",
+            "/applications/", "/developer/"
+        });
+    }
+
+    if (winCtx) {
+        m_trustedPathFragments.append({
+            "\\windows\\",
+            "\\program files\\",
+            "\\program files (x86)\\",
+            "\\programdata\\",
+            "\\windows\\system32",
+            "\\windows\\syswow64"
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // PERSISTENCE DIRS – only load paths relevant to detected platform(s).
+    // Moving this out of checkByLocation allows context-aware filtering.
+    // -----------------------------------------------------------------------
+    m_persistenceDirs.clear();
+
+    if (linCtx) {
+        m_persistenceDirs.append({
+            "/etc/cron.d/",
+            "/etc/cron.daily/",
+            "/etc/cron.hourly/",
+            "/etc/cron.weekly/",
+            "/.config/autostart/"
+        });
+    }
+
+    if (macCtx) {
+        m_persistenceDirs.append({
+            "/library/launchagents/",
+            "/library/launchd/"
+        });
+    }
+
+    if (winCtx) {
+        m_persistenceDirs.append({
+            "\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\",
+            "\\programdata\\microsoft\\windows\\start menu\\programs\\startup\\"
+        });
+    }
+}
+
+// ============================================================================
+// FileScannerWorker – constructor
+// ============================================================================
+FileScannerWorker::FileScannerWorker(const QString& rootPath,
+                                     QAtomicInt*    cancelFlag,
+                                     QObject*       parent)
+    : QObject(parent)
+    , m_rootPath(rootPath)
+    , m_cancelFlag(cancelFlag)
+{
+    m_ctx = detectContext(rootPath);
+    buildFilterLists();
 }
 
 // ============================================================================
@@ -267,7 +412,7 @@ bool FileScannerWorker::checkByNameAndExtension(const QString& fileName,
         }
     }
 
-    // 2. Suspicious name fragment – always checked, but only if NOT a trusted path
+    // 2. Suspicious name fragment – always checked, but not in trusted paths
     if (!isTrustedPath(lowerPath)) {
         for (const QString& frag : m_suspiciousNameFragments) {
             if (lowerName.contains(frag)) {
@@ -325,8 +470,9 @@ bool FileScannerWorker::checkByLocation(const QString& lowerPath,
     const bool isExecOrScript =
         m_highRiskExtensions.contains(ext) || m_suspiciousExtensions.contains(ext);
 
-    // Temp directories: only flag executables / scripts
-    static const QStringList tempDirs = {
+    // Temp directories: only flag executables / scripts.
+    // These entries are valid across all platforms so no context gate needed.
+    static const QVector<QString> tempDirs = {
         "/tmp/", "/var/tmp/", "/dev/shm/",
         "\\temp\\", "\\tmp\\",
         "\\appdata\\local\\temp\\"
@@ -340,17 +486,8 @@ bool FileScannerWorker::checkByLocation(const QString& lowerPath,
         }
     }
 
-    // Persistence locations: flag any file (not just executables)
-    static const QStringList persistenceDirs = {
-        "\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\",
-        "\\programdata\\microsoft\\windows\\start menu\\programs\\startup\\",
-        "/library/launchagents/",
-        "/library/launchd/",
-        "/etc/cron.d/", "/etc/cron.daily/",
-        "/etc/cron.hourly/", "/etc/cron.weekly/",
-        "/.config/autostart/"
-    };
-    for (const QString& loc : persistenceDirs) {
+    // Persistence locations: populated per-platform in buildFilterLists()
+    for (const QString& loc : m_persistenceDirs) {
         if (lowerPath.contains(loc)) {
             outCategory = "File in Persistence Location";
             outReason   = QString("File resides in a system persistence/autostart "
@@ -370,6 +507,10 @@ bool FileScannerWorker::checkByMagicBytes(const QString& filePath,
                                            QString& outReason,
                                            QString& outCategory) const
 {
+    // Skip expensive I/O on network filesystems
+    if (m_ctx.isNetworkFs)
+        return false;
+
     QFile f(filePath);
     if (!f.open(QIODevice::ReadOnly))
         return false;
@@ -400,7 +541,7 @@ bool FileScannerWorker::checkByMagicBytes(const QString& filePath,
         header[1] == 'E' && header[2] == 'L' && header[3] == 'F')
     {
         static const QVector<QString> okExts = {
-            "so","elf","bin","out","run","axf","prx","ko","o",""
+            "so","elf","bin","out","run","axf","prx","ko","o","","appimage"
         };
         if (!okExts.contains(ext) && !isVersionedSharedLib(lowerName, ext)) {
             outCategory = "ELF Binary With Misleading Extension";
@@ -469,14 +610,11 @@ void FileScannerWorker::doScan()
     QElapsedTimer wallTimer;
     wallTimer.start();
 
-    int totalScanned    = 0;
-    int suspiciousCount = 0;
-    int dirCount        = 0;   // for progress estimation
+    int     totalScanned    = 0;
+    int     suspiciousCount = 0;
+    int     dirCount        = 0;
+    qint64  totalBytes      = 0;
 
-    // We don't know total file count upfront, so use a time-based sigmoid:
-    // progress = 1 - e^(-k*t) mapped to 0..95 while running.
-    // Simpler alternative used here: increment per-directory, cap at 95.
-    // The exact per-dir increment uses a target of ~500 dirs = 95%.
     const int targetDirs     = 500;
     int       lastProgress   = 0;
 
@@ -509,7 +647,6 @@ void FileScannerWorker::doScan()
             ++dirCount;
             emit scanningPath(dirPath);
 
-            // Linear progress 0→95 over first `targetDirs` directories
             int newProgress = qMin(95, (dirCount * 95) / targetDirs);
             if (newProgress != lastProgress) {
                 lastProgress = newProgress;
@@ -522,6 +659,7 @@ void FileScannerWorker::doScan()
         }
 
         ++totalScanned;
+        totalBytes += fi.size();
 
         const QString fileName  = fi.fileName();
         const QString lowerName = fileName.toLower();
@@ -550,7 +688,7 @@ void FileScannerWorker::doScan()
 
     emit progressUpdated(100);
     int elapsed = static_cast<int>(wallTimer.elapsed() / 1000);
-    emit scanFinished(totalScanned, suspiciousCount, elapsed);
+    emit scanFinished(totalScanned, suspiciousCount, elapsed, totalBytes);
 }
 
 // ============================================================================
@@ -570,47 +708,26 @@ bool FileScanner::isRunning() const
     return m_thread && m_thread->isRunning();
 }
 
-// Key fix for SIGSEGV:
-// Previous code set m_thread/m_worker to nullptr THEN let deleteLater fire –
-// causing a double-free or use-after-free.  The correct pattern is:
-//   • Use QPointer<QThread> so we can safely check after wait().
-//   • Never touch m_worker after moveToThread() – it lives on the worker thread.
-//   • The deleteLater() chain (thread::finished → worker::deleteLater,
-//     thread::finished → thread::deleteLater) handles cleanup automatically.
-//   • startScan() creates fresh objects each time; it does NOT reuse old ones.
 void FileScanner::startScan(const QString& rootPath)
 {
-    // If somehow called while still running, cancel first
     if (m_thread && m_thread->isRunning()) {
         cancelScan();
     }
 
-    // Reset cancel flag BEFORE creating new thread/worker
     m_cancelFlag.storeRelaxed(0);
 
-    // Create fresh objects – previous ones were cleaned up via deleteLater
-    m_thread = new QThread(this);    // parent = this so Qt tracks it
+    m_thread = new QThread(this);
     m_worker = new FileScannerWorker(rootPath, &m_cancelFlag);
-    // Worker has NO parent so it can be safely moved to another thread
     m_worker->moveToThread(m_thread);
 
-    // Worker cleanup: when thread finishes, delete worker (on worker thread),
-    // then delete thread (on this thread).
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
     connect(m_thread, &QThread::finished, m_thread, &QObject::deleteLater);
-
-    // Null our pointers when the thread object is about to be destroyed,
-    // so isRunning() returns false and we don't double-delete.
     connect(m_thread, &QThread::finished, this, &FileScanner::onThreadFinished);
+    connect(m_thread, &QThread::started,  m_worker, &FileScannerWorker::doScan);
 
-    // Start worker slot when thread starts
-    connect(m_thread, &QThread::started, m_worker, &FileScannerWorker::doScan);
-
-    // Quit thread event-loop when worker signals done/error
     connect(m_worker, &FileScannerWorker::scanFinished, m_thread, &QThread::quit);
     connect(m_worker, &FileScannerWorker::scanError,    m_thread, &QThread::quit);
 
-    // Re-emit worker signals to our own listeners (QueuedConnection = cross-thread safe)
     connect(m_worker, &FileScannerWorker::scanningPath,
             this,     &FileScanner::scanningPath,
             Qt::QueuedConnection);
@@ -635,29 +752,22 @@ void FileScanner::cancelScan()
     if (!m_thread)
         return;
 
-    // Signal worker to stop iterating
     m_cancelFlag.storeRelaxed(1);
 
     if (m_thread->isRunning()) {
         m_thread->quit();
-        // Wait up to 4 seconds for clean shutdown
         if (!m_thread->wait(4000)) {
-            // Force-terminate only as last resort
             m_thread->terminate();
             m_thread->wait(1000);
         }
     }
-    // Do NOT call deleteLater here – the finished() signal already does it.
-    // Just null our pointers; the objects will self-destruct via the
-    // deleteLater chain that was set up in startScan().
+
     m_thread = nullptr;
     m_worker = nullptr;
 }
 
 void FileScanner::onThreadFinished()
 {
-    // Called on the UI thread when the worker thread's event loop exits.
-    // Safe to null these now – deleteLater is already queued.
     m_thread = nullptr;
     m_worker = nullptr;
 }
