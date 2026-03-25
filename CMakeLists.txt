@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(QtHello LANGUAGES CXX)
+project(QtHello LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +27,11 @@ add_executable(main
     src/core/FileScannerHash.cpp    # hash DB + SHA-256 detection (-O3)
     src/core/FileScannerEngine.cpp  # doScan loop + FileScanner controller (-O2)
     # FileScannerDetectors.cpp is excluded – reserved for future detectors
+    src/db/ScanDatabase.cpp       # SQLite persistence layer
+    src/db/sqlite3.c              # SQLite amalgamation – no install required
 )
+
+target_include_directories(main PRIVATE src/core)
 
 target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network)
 
@@ -42,6 +46,13 @@ set_source_files_properties(
     src/core/FileScannerEngine.cpp
     PROPERTIES COMPILE_OPTIONS "-O2"
 )
+
+# Suppress warnings on sqlite3.c (third-party file, not our code)
+if(MSVC)
+    set_source_files_properties(src/core/sqlite3.c PROPERTIES COMPILE_FLAGS "/w")
+else()
+    set_source_files_properties(src/core/sqlite3.c PROPERTIES COMPILE_FLAGS "-w")
+endif()
 
 include(GNUInstallDirs)
 

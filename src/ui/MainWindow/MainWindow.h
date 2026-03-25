@@ -4,7 +4,8 @@
 #include <QString>
 #include <QVector>
 
-#include "../../core/FileScanner.h"   // for SuspiciousFile, ScanRecord
+#include "../../core/FileScanner.h"
+#include "../../db/ScanDatabase.h"   // for SuspiciousFile, ScanRecord
 #include "../ScanTypeOverlay/ScanTypeOverlay.h"
 
 class QPushButton;
@@ -58,6 +59,10 @@ private slots:
 
     // ---- CVE lookup ----
     void onCveLookupReply(QNetworkReply* reply);
+
+    // ---- Database ----
+    void onDbRecordSaved(qint64 scanId);
+    void onCacheUpdateReady(const QVector<CacheEntry>& entries);
 
 private:
     // -----------------------------------------------------------------------
@@ -160,4 +165,8 @@ private:
 
     // Track how many CVE queries are in flight
     int m_pendingCveQueries = 0;
+
+    // Database
+    ScanDatabase* m_db        = nullptr;
+    int           m_scanCount = 0;   // used to trigger periodic cache pruning
 };

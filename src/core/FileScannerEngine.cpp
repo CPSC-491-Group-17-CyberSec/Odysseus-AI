@@ -86,7 +86,18 @@ void FileScannerWorker::doScan()
         ++totalScanned;
         totalBytes += fi.size();
 
-        const QString ext = fi.suffix().toLower();
+        const QString ext          = fi.suffix().toLower();
+        const QString lastModified = fi.lastModified().toString(Qt::ISODate);
+
+        // ------------------------------------------------------------------
+        // Incremental scan cache check:
+        // If this file's path is in the cache AND its lastModified timestamp
+        // hasn't changed, we already know it's clean – skip hashing entirely.
+        // ------------------------------------------------------------------
+        const auto cacheIt = m_scanCache.constFind(absPath);
+        if (cacheIt != m_scanCache.constEnd() && cacheIt.value() == lastModified)
+            continue;   // cache hit – file unchanged since last scan, skip
+
         QString reason, category;
 
         if (checkByHash(absPath, ext, fi.size(), reason, category)) {
@@ -99,11 +110,20 @@ void FileScannerWorker::doScan()
             sf.lastModified = fi.lastModified();
             emit suspiciousFileFound(sf);
             ++suspiciousCount;
+        } else {
+            // File is clean – add to cache update buffer so the DB can record
+            // it and skip it on the next scan.
+            m_cacheUpdates.append({ absPath, lastModified });
         }
     }
 
     emit progressUpdated(100);
     const int elapsed = static_cast<int>(wallTimer.elapsed() / 1000);
+
+    // Emit the cache updates so ScanDatabase can persist them asynchronously.
+    if (!m_cacheUpdates.isEmpty())
+        emit cacheUpdateReady(m_cacheUpdates);
+
     emit scanFinished(totalScanned, suspiciousCount, elapsed, totalBytes);
 }
 
@@ -124,7 +144,7 @@ bool FileScanner::isRunning() const
     return m_thread && m_thread->isRunning();
 }
 
-void FileScanner::startScan(const QString& rootPath)
+void FileScanner::startScan(const QString& rootPath, QHash<QString, QString> scanCache)
 {
     if (m_thread && m_thread->isRunning())
         cancelScan();
@@ -132,7 +152,7 @@ void FileScanner::startScan(const QString& rootPath)
     m_cancelFlag.storeRelaxed(0);
 
     m_thread = new QThread(this);
-    m_worker = new FileScannerWorker(rootPath, &m_cancelFlag);
+    m_worker = new FileScannerWorker(rootPath, &m_cancelFlag, std::move(scanCache));
     m_worker->moveToThread(m_thread);
 
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);
@@ -157,6 +177,9 @@ void FileScanner::startScan(const QString& rootPath)
             Qt::QueuedConnection);
     connect(m_worker, &FileScannerWorker::scanError,
             this,     &FileScanner::scanError,
+            Qt::QueuedConnection);
+    connect(m_worker, &FileScannerWorker::cacheUpdateReady,
+            this,     &FileScanner::cacheUpdateReady,
             Qt::QueuedConnection);
 
     m_thread->start();

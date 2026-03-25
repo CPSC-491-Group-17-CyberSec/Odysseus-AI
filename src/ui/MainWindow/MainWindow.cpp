@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "../../core/FileScanner.h"
+#include "../../db/ScanDatabase.h"
 #include "../ThreatCard/ThreatCard.h"
 
 #include <QPushButton>
@@ -33,6 +34,7 @@
 #include <QDateTime>
 #include <QFont>
 #include <QBrush>
+#include <utility>
 #include <QStorageInfo>
 #include <QResizeEvent>
 
@@ -105,6 +107,31 @@ MainWindow::MainWindow(QWidget *parent)
     m_nam = new QNetworkAccessManager(this);
     connect(m_nam, &QNetworkAccessManager::finished,
             this,  &MainWindow::onCveLookupReply);
+
+    // Database
+    m_db = new ScanDatabase(this);
+    connect(m_db, &ScanDatabase::recordSaved,
+            this, &MainWindow::onDbRecordSaved);
+    connect(m_db, &ScanDatabase::databaseError,
+            this, [](const QString& msg){ qWarning() << "[DB ERROR]" << msg; });
+
+    // Wire scanner cache signal → DB flush
+    connect(m_scanner, &FileScanner::cacheUpdateReady,
+            this,      &MainWindow::onCacheUpdateReady);
+
+    // Pre-load persisted scan history from SQLite (newest-first)
+    m_history = m_db->loadAllScanRecords();
+    for (const ScanRecord& r : m_history) {
+        QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
+            .arg(r.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
+            .arg(r.suspiciousCount)
+            .arg(r.totalScanned)
+            .arg(formatElapsed(r.elapsedSeconds));
+        auto* hi = new QListWidgetItem(label);
+        hi->setForeground(QBrush(r.suspiciousCount > 0
+                                 ? QColor("#B71C1C") : QColor("#2E7D32")));
+        historyList->addItem(hi);
+    }
 }
 
 MainWindow::~MainWindow()
@@ -893,7 +920,11 @@ void MainWindow::startScanForPath(const QString& rootPath)
     if (m_driveTotalBytes > 0)
         scanStorageLabel->setText("Storage: 0 B / " + formatBytes(m_driveTotalBytes));
 
-    m_scanner->startScan(rootPath);
+    // Load scan cache and pass it to the worker for incremental scanning.
+    QHash<QString, QString> cache;
+    if (m_db)
+        cache = m_db->loadScanCache();
+    m_scanner->startScan(rootPath, std::move(cache));
 }
 
 void MainWindow::onScanTimerTick()
@@ -1028,6 +1059,15 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     record.elapsedSeconds  = elapsedSeconds;
     record.findings        = m_findings;   // snapshot (CVE fields may still be empty, ok)
     m_history.prepend(record);  // newest first; historyList is rebuilt on demand
+
+    // Persist to SQLite (async – writer thread handles it)
+    if (m_db) {
+        m_db->saveScanRecord(record);
+        // Prune stale cache entries every 5 scans to prevent unbounded growth
+        ++m_scanCount;
+        if (m_scanCount % 5 == 0)
+            m_db->pruneStaleCache();
+    }
 }
 
 void MainWindow::onScanError(const QString& message)
@@ -1148,4 +1188,20 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
     }
 
     showPanel(ActivePanel::HistoryDetail);
+}
+// ============================================================================
+// DATABASE SLOTS
+// ============================================================================
+void MainWindow::onDbRecordSaved(qint64 scanId)
+{
+    qDebug() << "[DB] Scan record saved, rowid =" << scanId;
+}
+
+void MainWindow::onCacheUpdateReady(const QVector<CacheEntry>& entries)
+{
+    // Received on UI thread via queued connection after scan finishes.
+    // Hand off to the DB writer thread immediately – non-blocking.
+    if (m_db)
+        m_db->flushScanCache(entries);
+    qDebug() << "[DB] Cache flush queued for" << entries.size() << "entries";
 }

@@ -120,12 +120,14 @@ void FileScannerWorker::buildFilterLists()
 // ============================================================================
 // FileScannerWorker – constructor
 // ============================================================================
-FileScannerWorker::FileScannerWorker(const QString& rootPath,
-                                     QAtomicInt*    cancelFlag,
-                                     QObject*       parent)
+FileScannerWorker::FileScannerWorker(const QString&          rootPath,
+                                     QAtomicInt*             cancelFlag,
+                                     QHash<QString, QString> scanCache,
+                                     QObject*                parent)
     : QObject(parent)
     , m_rootPath(rootPath)
     , m_cancelFlag(cancelFlag)
+    , m_scanCache(std::move(scanCache))
 {
     m_ctx    = detectContext(rootPath);
     buildFilterLists();
