@@ -39,6 +39,17 @@ struct ScanRecord
 };
 
 // ---------------------------------------------------------------------------
+// CacheEntry  –  one row in the scan_cache table
+// Passed into the worker as a pre-loaded QHash so the worker thread never
+// touches the database directly.
+// ---------------------------------------------------------------------------
+struct CacheEntry
+{
+    QString filePath;
+    QString lastModified;   // Qt::ISODate string – matches QFileInfo::lastModified()
+};
+
+// ---------------------------------------------------------------------------
 // ScanContext  –  OS + filesystem profile detected at scan time
 // ---------------------------------------------------------------------------
 struct ScanContext
@@ -64,9 +75,10 @@ class FileScannerWorker : public QObject
     Q_OBJECT
 
 public:
-    explicit FileScannerWorker(const QString& rootPath,
-                               QAtomicInt*    cancelFlag,
-                               QObject*       parent = nullptr);
+    explicit FileScannerWorker(const QString&              rootPath,
+                               QAtomicInt*                 cancelFlag,
+                               QHash<QString, QString>     scanCache,
+                               QObject*                    parent = nullptr);
 
 public slots:
     void doScan();
@@ -77,6 +89,8 @@ signals:
     void suspiciousFileFound(const SuspiciousFile& file);
     void scanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
     void scanError(const QString& message);
+    // Emitted once at scan end – batch of newly-clean files to write to cache
+    void cacheUpdateReady(const QVector<CacheEntry>& entries);
 
 private:
     // ----- Scan loop helpers -----
@@ -102,6 +116,12 @@ private:
     QVector<QString>        m_skipDirFragments;   // directories to skip entirely (performance)
     QSet<QString>           m_noHashExtensions;   // extensions exempt from hashing
     QHash<QString, QString> m_hashDb;             // sha256 hex → malware name
+
+    // Incremental scan cache (path → lastModified ISO string)
+    // Loaded once before the scan starts; never written from the worker thread.
+    QHash<QString, QString> m_scanCache;
+    // Accumulated clean-file entries to flush to DB after the scan.
+    QVector<CacheEntry>     m_cacheUpdates;
 };
 
 // ---------------------------------------------------------------------------
@@ -115,7 +135,7 @@ public:
     explicit FileScanner(QObject* parent = nullptr);
     ~FileScanner() override;
 
-    void startScan(const QString& rootPath);
+    void startScan(const QString& rootPath, QHash<QString, QString> scanCache = {});
     void cancelScan();
     bool isRunning() const;
 
@@ -125,6 +145,7 @@ signals:
     void suspiciousFileFound(const SuspiciousFile& file);
     void scanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
     void scanError(const QString& message);
+    void cacheUpdateReady(const QVector<CacheEntry>& entries);
 
 private slots:
     void onThreadFinished();

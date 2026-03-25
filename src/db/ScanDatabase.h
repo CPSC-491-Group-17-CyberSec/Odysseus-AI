@@ -22,10 +22,11 @@
 #include <QMutex>
 #include <QWaitCondition>
 #include <QThread>
+#include <QHash>
 #include <QQueue>
 #include <functional>
 
-#include "../../core/FileScanner.h"   // SuspiciousFile, ScanRecord
+#include "../core/FileScanner.h"   // SuspiciousFile, ScanRecord
 
 // Forward-declare the opaque SQLite handle so callers never need sqlite3.h
 struct sqlite3;
@@ -66,6 +67,19 @@ public:
 
     // Load just the N most-recent scan headers (no findings) – fast overview.
     QVector<ScanRecord> loadRecentScanHeaders(int n = 50) const;
+
+    // Load the entire scan cache into memory as path → lastModified.
+    // Call this on the UI thread before starting a scan; pass the result
+    // to FileScanner::startScan() so the worker can do cache lookups.
+    QHash<QString, QString> loadScanCache() const;
+
+    // Persist a batch of newly-clean file entries into the scan_cache table.
+    // Non-blocking: enqueues the work for the writer thread.
+    void flushScanCache(const QVector<CacheEntry>& entries);
+
+    // Remove entries from scan_cache for files that no longer exist on disk.
+    // Call occasionally (e.g. after every 5th scan) to prevent stale growth.
+    void pruneStaleCache();
 
     // Full path to the SQLite file (useful for diagnostics).
     QString databasePath() const { return m_dbPath; }
