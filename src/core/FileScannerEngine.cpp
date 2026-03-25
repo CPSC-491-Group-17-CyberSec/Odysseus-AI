@@ -1,5 +1,20 @@
 // FileScannerEngine.cpp
-// Main scan loop (doScan) and the UI-thread FileScanner controller.
+// doScan() orchestrator and the UI-thread FileScanner controller.
+//
+// Architecture:
+//   doScan() runs on the dedicated worker QThread and acts as the enumeration
+//   producer.  It iterates the directory tree with QDirIterator, checks the
+//   scan cache, and pushes uncached files onto a bounded work queue.
+//
+//   N hash-worker threads (QThread::create) consume that queue in parallel,
+//   calling checkByHash() on each file.  Because checkByHash() is const and
+//   only reads shared immutable data (m_hashDb, m_noHashExtensions, m_ctx),
+//   no locking is needed inside it.
+//
+//   Signals (suspiciousFileFound, etc.) are emitted across thread boundaries
+//   safely: all connections to FileScanner use Qt::QueuedConnection, and
+//   Qt guarantees signal emission is thread-safe.
+//
 // Compiled with -O2.
 
 #include "FileScanner.h"
@@ -23,8 +38,7 @@ bool FileScannerWorker::shouldSkipDirectory(const QString& lowerDirPath) const
 }
 
 // ============================================================================
-// doScan  –  runs on the worker thread.
-// Files are flagged only when their SHA-256 hash matches the loaded database.
+// doScan  –  enumeration producer + thread-pool coordinator
 // ============================================================================
 void FileScannerWorker::doScan()
 {
@@ -38,12 +52,32 @@ void FileScannerWorker::doScan()
     QElapsedTimer wallTimer;
     wallTimer.start();
 
-    int    totalScanned    = 0;
-    int    suspiciousCount = 0;
-    int    dirCount        = 0;
-    qint64 totalBytes      = 0;
+    // Reset shared accumulators (worker may theoretically be reused).
+    m_totalScanned.storeRelaxed(0);
+    m_suspiciousCount.storeRelaxed(0);
+    m_bytesScanned.storeRelaxed(0);
+    m_enumDone = false;
+    m_sharedCacheUpdates.clear();
 
+    // ------------------------------------------------------------------
+    // Launch N hash-worker threads.
+    // We use min(idealThreadCount, 4) threads so we don't over-subscribe
+    // on small machines, but fully exploit modern multi-core CPUs.
+    // ------------------------------------------------------------------
+    const int nWorkers = qBound(2, QThread::idealThreadCount(), 4);
+    QVector<QThread*> hashThreads;
+    hashThreads.reserve(nWorkers);
+    for (int i = 0; i < nWorkers; ++i) {
+        QThread* t = QThread::create([this]() { runHashWorker(); });
+        t->start();
+        hashThreads.append(t);
+    }
+
+    // ------------------------------------------------------------------
+    // Enumeration phase (runs on this thread, i.e. the worker QThread).
+    // ------------------------------------------------------------------
     const int targetDirs   = 500;
+    int       dirCount     = 0;
     int       lastProgress = 0;
 
     QDirIterator it(
@@ -53,6 +87,11 @@ void FileScannerWorker::doScan()
     );
 
     QString lastDir;
+
+    // Resume support: if m_resumeFromDir is set, skip everything before it.
+    // Comparison is lexicographic on the absolute path – QDirIterator
+    // visits in filesystem order which is typically alphabetical per level.
+    bool pastResumePoint = m_resumeFromDir.isEmpty();
 
     while (it.hasNext()) {
         if (m_cancelFlag->loadRelaxed() != 0)
@@ -68,6 +107,7 @@ void FileScannerWorker::doScan()
         if (shouldSkipDirectory(lowerDir))
             continue;
 
+        // Progress + resume bookkeeping on directory change.
         if (dirPath != lastDir) {
             lastDir = dirPath;
             ++dirCount;
@@ -81,50 +121,72 @@ void FileScannerWorker::doScan()
 
             if (dirCount % 200 == 0)
                 QThread::yieldCurrentThread();
+
+            // Once we reach or pass the stored resume directory, start scanning.
+            if (!pastResumePoint && dirPath >= m_resumeFromDir)
+                pastResumePoint = true;
         }
 
-        ++totalScanned;
-        totalBytes += fi.size();
+        if (!pastResumePoint)
+            continue;
+
+        // Always count bytes so the storage label reflects the traversal scope.
+        m_bytesScanned.fetchAndAddRelaxed(fi.size());
 
         const QString ext          = fi.suffix().toLower();
         const QString lastModified = fi.lastModified().toString(Qt::ISODate);
 
-        // ------------------------------------------------------------------
-        // Incremental scan cache check:
-        // If this file's path is in the cache AND its lastModified timestamp
-        // hasn't changed, we already know it's clean – skip hashing entirely.
-        // ------------------------------------------------------------------
+        // Cache hit: file unchanged since last scan – skip hashing.
         const auto cacheIt = m_scanCache.constFind(absPath);
-        if (cacheIt != m_scanCache.constEnd() && cacheIt.value() == lastModified)
-            continue;   // cache hit – file unchanged since last scan, skip
-
-        QString reason, category;
-
-        if (checkByHash(absPath, ext, fi.size(), reason, category)) {
-            SuspiciousFile sf;
-            sf.filePath     = absPath;
-            sf.fileName     = fi.fileName();
-            sf.reason       = reason;
-            sf.category     = category;
-            sf.sizeBytes    = fi.size();
-            sf.lastModified = fi.lastModified();
-            emit suspiciousFileFound(sf);
-            ++suspiciousCount;
-        } else {
-            // File is clean – add to cache update buffer so the DB can record
-            // it and skip it on the next scan.
-            m_cacheUpdates.append({ absPath, lastModified });
+        if (cacheIt != m_scanCache.constEnd() && cacheIt.value() == lastModified) {
+            m_totalScanned.fetchAndAddRelaxed(1);
+            continue;
         }
+
+        // Push to bounded work queue for a hash worker.
+        {
+            QMutexLocker lock(&m_workMutex);
+            while (m_workQueue.size() >= kMaxQueueSize &&
+                   m_cancelFlag->loadRelaxed() == 0) {
+                // Queue full – yield until a worker drains some items.
+                m_workHasSpace.wait(&m_workMutex);
+            }
+            if (m_cancelFlag->loadRelaxed() != 0)
+                break;
+            m_workQueue.enqueue({ absPath, ext, fi.size(), lastModified });
+            m_workHasItems.wakeOne();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Signal enumeration complete; wake all waiting hash workers so they
+    // can drain the remaining queue and exit.
+    // ------------------------------------------------------------------
+    {
+        QMutexLocker lock(&m_workMutex);
+        m_enumDone = true;
+        m_workHasItems.wakeAll();
+    }
+
+    // Wait for every hash worker to finish.
+    for (QThread* t : hashThreads) {
+        t->wait();
+        delete t;
     }
 
     emit progressUpdated(100);
     const int elapsed = static_cast<int>(wallTimer.elapsed() / 1000);
 
-    // Emit the cache updates so ScanDatabase can persist them asynchronously.
-    if (!m_cacheUpdates.isEmpty())
-        emit cacheUpdateReady(m_cacheUpdates);
+    // Emit accumulated clean-file cache updates for DB persistence.
+    if (!m_sharedCacheUpdates.isEmpty())
+        emit cacheUpdateReady(m_sharedCacheUpdates);
 
-    emit scanFinished(totalScanned, suspiciousCount, elapsed, totalBytes);
+    emit scanFinished(
+        m_totalScanned.loadRelaxed(),
+        m_suspiciousCount.loadRelaxed(),
+        elapsed,
+        m_bytesScanned.loadRelaxed()
+    );
 }
 
 // ============================================================================
@@ -144,7 +206,9 @@ bool FileScanner::isRunning() const
     return m_thread && m_thread->isRunning();
 }
 
-void FileScanner::startScan(const QString& rootPath, QHash<QString, QString> scanCache)
+void FileScanner::startScan(const QString& rootPath,
+                             QHash<QString, QString> scanCache,
+                             const QString& resumeFromDir)
 {
     if (m_thread && m_thread->isRunning())
         cancelScan();
@@ -152,7 +216,8 @@ void FileScanner::startScan(const QString& rootPath, QHash<QString, QString> sca
     m_cancelFlag.storeRelaxed(0);
 
     m_thread = new QThread(this);
-    m_worker = new FileScannerWorker(rootPath, &m_cancelFlag, std::move(scanCache));
+    m_worker = new FileScannerWorker(rootPath, &m_cancelFlag,
+                                     std::move(scanCache), resumeFromDir);
     m_worker->moveToThread(m_thread);
 
     connect(m_thread, &QThread::finished, m_worker, &QObject::deleteLater);

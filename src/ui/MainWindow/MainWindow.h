@@ -44,6 +44,7 @@ private slots:
     void onRunScanClicked();
     void onFullScanRequested();
     void onPartialScanRequested(const QString& path);
+    void onResumeScanRequested();
     void onScanningPath(const QString& path);
     void onProgressUpdated(int percent);
     void onSuspiciousFileFound(const SuspiciousFile& file);
@@ -69,6 +70,11 @@ private:
     // Panel identity (only one right-side panel visible at a time)
     // -----------------------------------------------------------------------
     enum class ActivePanel { None, ThreatDetails, ScanResults, History, HistoryDetail };
+
+    // -----------------------------------------------------------------------
+    // Scan mode – determines the storage denominator shown in the scan panel
+    // -----------------------------------------------------------------------
+    enum class ScanMode { Full, Partial, Resumed };
 
     void showPanel(ActivePanel panel);
 
@@ -158,6 +164,10 @@ private:
     QTimer* m_scanTimer       = nullptr;
     int     m_elapsedSeconds  = 0;
     qint64  m_driveTotalBytes = 0;
+
+    // Scan mode and active flag (used for storage-label logic)
+    ScanMode m_scanMode   = ScanMode::Full;
+    bool     m_scanActive = false;
 
     // CVE lookup
     QNetworkAccessManager*  m_nam           = nullptr;

@@ -36,6 +36,7 @@
 #include <QBrush>
 #include <utility>
 #include <QStorageInfo>
+#include <QDirIterator>
 #include <QResizeEvent>
 
 // ============================================================================
@@ -84,6 +85,8 @@ MainWindow::MainWindow(QWidget *parent)
             this,          &MainWindow::onFullScanRequested);
     connect(m_scanOverlay, &ScanTypeOverlay::partialScanRequested,
             this,          &MainWindow::onPartialScanRequested);
+    connect(m_scanOverlay, &ScanTypeOverlay::resumeScanRequested,
+            this,          &MainWindow::onResumeScanRequested);
 
     // Scanner
     m_scanner = new FileScanner(this);
@@ -873,6 +876,7 @@ void MainWindow::onRunScanClicked()
 
 void MainWindow::onFullScanRequested()
 {
+    m_scanMode = ScanMode::Full;
     QString rootPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
     if (rootPath.isEmpty())
         rootPath = QDir::rootPath();
@@ -881,7 +885,25 @@ void MainWindow::onFullScanRequested()
 
 void MainWindow::onPartialScanRequested(const QString& path)
 {
+    m_scanMode = ScanMode::Partial;
     startScanForPath(path);
+}
+
+void MainWindow::onResumeScanRequested()
+{
+    m_scanMode = ScanMode::Resumed;
+
+    // Load the root used in the last scan; fall back to home if nothing saved yet.
+    QString rootPath;
+    if (m_db)
+        rootPath = m_db->loadLastScanRoot();
+    if (rootPath.isEmpty()) {
+        rootPath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+        if (rootPath.isEmpty())
+            rootPath = QDir::rootPath();
+    }
+
+    startScanForPath(rootPath);
 }
 
 void MainWindow::startScanForPath(const QString& rootPath)
@@ -892,6 +914,7 @@ void MainWindow::startScanForPath(const QString& rootPath)
     m_cveQueryIndex     = 0;
     m_pendingCveQueries = 0;
     m_driveTotalBytes   = 0;
+    m_scanActive        = true;
 
     scanResultsList->clear();
     scanSummaryLabel->setText("Scanning...");
@@ -911,14 +934,48 @@ void MainWindow::startScanForPath(const QString& rootPath)
         "QPushButton:hover { background-color: #AA1100; }"
     );
 
-    qDebug() << "=== Odysseus File Scan Started ===" << rootPath;
+    qDebug() << "=== Odysseus File Scan Started ===" << rootPath
+             << "(mode:" << static_cast<int>(m_scanMode) << ")";
     m_scanTimer->start();
 
-    // Capture total capacity of the drive being scanned
-    QStorageInfo si(rootPath);
-    m_driveTotalBytes = si.bytesTotal();
-    if (m_driveTotalBytes > 0)
-        scanStorageLabel->setText("Storage: 0 B / " + formatBytes(m_driveTotalBytes));
+    // ---- Storage denominator depends on scan mode ----
+    if (m_scanMode == ScanMode::Full || m_scanMode == ScanMode::Resumed) {
+        // Full / resumed scan: show total drive capacity immediately.
+        QStorageInfo si(rootPath);
+        m_driveTotalBytes = si.bytesTotal();
+        if (m_driveTotalBytes > 0)
+            scanStorageLabel->setText("Storage: 0 B / " + formatBytes(m_driveTotalBytes));
+    } else {
+        // Partial scan: calculate the actual directory size in a background thread
+        // so we don't block the UI while walking potentially large directory trees.
+        scanStorageLabel->setText("Storage: Calculating...");
+        QString capturedPath = rootPath;
+        auto* sizeThread = QThread::create([this, capturedPath]() {
+            qint64 total = 0;
+            QDirIterator it(capturedPath,
+                            QDir::Files | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+                            QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                if (QThread::currentThread()->isInterruptionRequested())
+                    return;
+                it.next();
+                total += it.fileInfo().size();
+            }
+            QMetaObject::invokeMethod(this, [this, total]() {
+                m_driveTotalBytes = total;
+                // Only update label if the scan is still in progress;
+                // onScanFinished may have already written the final summary.
+                if (m_scanActive && total > 0)
+                    scanStorageLabel->setText("Storage: 0 B / " + formatBytes(total));
+            }, Qt::QueuedConnection);
+        });
+        connect(sizeThread, &QThread::finished, sizeThread, &QObject::deleteLater);
+        sizeThread->start();
+    }
+
+    // Persist this scan's root so "Scan from Last Point" can resume here next time.
+    if (m_db)
+        m_db->saveLastScanRoot(rootPath);
 
     // Load scan cache and pass it to the worker for incremental scanning.
     QHash<QString, QString> cache;
@@ -996,6 +1053,7 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
 void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned)
 {
     m_scanTimer->stop();
+    m_scanActive = false;
 
     runScanButton->setText("Run Scan");
     runScanButton->setStyleSheet(
@@ -1073,6 +1131,7 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
 void MainWindow::onScanError(const QString& message)
 {
     m_scanTimer->stop();
+    m_scanActive = false;
 
     runScanButton->setText("Run Scan");
     runScanButton->setStyleSheet(

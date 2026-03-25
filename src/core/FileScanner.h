@@ -6,8 +6,11 @@
 #include <QVector>
 #include <QSet>
 #include <QHash>
+#include <QQueue>
 #include <QDateTime>
 #include <QAtomicInt>
+#include <QMutex>
+#include <QWaitCondition>
 
 // ---------------------------------------------------------------------------
 // SuspiciousFile  –  one flagged file
@@ -68,6 +71,17 @@ struct ScanContext
 };
 
 // ---------------------------------------------------------------------------
+// FileWorkItem  –  a file queued for SHA-256 hashing by a worker thread
+// ---------------------------------------------------------------------------
+struct FileWorkItem
+{
+    QString filePath;
+    QString ext;
+    qint64  fileSize;
+    QString lastModified;   // Qt::ISODate
+};
+
+// ---------------------------------------------------------------------------
 // FileScannerWorker  –  runs on a dedicated QThread
 // ---------------------------------------------------------------------------
 class FileScannerWorker : public QObject
@@ -78,7 +92,8 @@ public:
     explicit FileScannerWorker(const QString&              rootPath,
                                QAtomicInt*                 cancelFlag,
                                QHash<QString, QString>     scanCache,
-                               QObject*                    parent = nullptr);
+                               const QString&              resumeFromDir = {},
+                               QObject*                    parent        = nullptr);
 
 public slots:
     void doScan();
@@ -96,32 +111,53 @@ private:
     // ----- Scan loop helpers -----
     bool shouldSkipDirectory(const QString& lowerDirPath) const;
 
-    // ----- Hash-based detection (sole detection method) -----
+    // ----- Hash-based detection -----
     bool checkByHash(const QString& filePath,
                      const QString& ext,
                      qint64         fileSize,
                      QString&       outReason,
                      QString&       outCategory) const;
 
+    // ----- Hash worker (called by N QThread::create threads) -----
+    void runHashWorker();
+
     // ----- Setup -----
     static ScanContext              detectContext(const QString& rootPath);
     void                            buildFilterLists();
     static QHash<QString, QString>  loadHashDatabase();
 
-    // ----- Data -----
+    // ----- Static config -----
+    static constexpr int kMaxQueueSize = 2000;   // max pending work items
+
+    // ----- Core data -----
     QString     m_rootPath;
     QAtomicInt* m_cancelFlag;
+    QString     m_resumeFromDir;    // if set, skip dirs before this path
     ScanContext m_ctx;
 
-    QVector<QString>        m_skipDirFragments;   // directories to skip entirely (performance)
-    QSet<QString>           m_noHashExtensions;   // extensions exempt from hashing
+    QVector<QString>        m_skipDirFragments;
+    QSet<QString>           m_noHashExtensions;
     QHash<QString, QString> m_hashDb;             // sha256 hex → malware name
 
     // Incremental scan cache (path → lastModified ISO string)
-    // Loaded once before the scan starts; never written from the worker thread.
     QHash<QString, QString> m_scanCache;
-    // Accumulated clean-file entries to flush to DB after the scan.
-    QVector<CacheEntry>     m_cacheUpdates;
+
+    // ----- Multi-thread work queue -----
+    // Enumeration thread produces FileWorkItems; N hash workers consume them.
+    QMutex               m_workMutex;
+    QWaitCondition       m_workHasItems;   // wakes consumers when queue gains items
+    QWaitCondition       m_workHasSpace;   // wakes producer when queue drains below max
+    QQueue<FileWorkItem> m_workQueue;
+    bool                 m_enumDone = false;    // set when enumeration finishes
+
+    // ----- Shared accumulators (written by hash workers) -----
+    QAtomicInt              m_totalScanned{0};
+    QAtomicInt              m_suspiciousCount{0};
+    QAtomicInteger<qint64>  m_bytesScanned{0};
+
+    // Cache updates buffer – written by workers, flushed after all workers join
+    QMutex              m_cacheMutex;
+    QVector<CacheEntry> m_sharedCacheUpdates;
 };
 
 // ---------------------------------------------------------------------------
@@ -135,7 +171,9 @@ public:
     explicit FileScanner(QObject* parent = nullptr);
     ~FileScanner() override;
 
-    void startScan(const QString& rootPath, QHash<QString, QString> scanCache = {});
+    void startScan(const QString& rootPath,
+                   QHash<QString, QString> scanCache   = {},
+                   const QString&          resumeFromDir = {});
     void cancelScan();
     bool isRunning() const;
 
