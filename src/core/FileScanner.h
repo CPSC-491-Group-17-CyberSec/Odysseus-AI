@@ -4,9 +4,10 @@
 #include <QThread>
 #include <QString>
 #include <QVector>
+#include <QSet>
+#include <QHash>
 #include <QDateTime>
 #include <QAtomicInt>
-#include <QStorageInfo>
 
 // ---------------------------------------------------------------------------
 // SuspiciousFile  –  one flagged file
@@ -42,18 +43,16 @@ struct ScanRecord
 // ---------------------------------------------------------------------------
 struct ScanContext
 {
-    // Running OS (compile-time)
     bool runningOnLinux   = false;
     bool runningOnWindows = false;
     bool runningOnMac     = false;
 
-    // Filesystem of the scanned path (runtime, via QStorageInfo)
-    QString fsType;             // "ext4", "ntfs", "apfs", etc. (lower-cased)
-    bool isWindowsFs  = false;  // ntfs / fat / vfat / exfat / refs / fuseblk (ntfs-3g)
-    bool isLinuxFs    = false;  // ext2/3/4, btrfs, xfs, zfs, f2fs, squashfs, etc.
-    bool isMacFs      = false;  // apfs, hfs, hfsplus
-    bool isRemovable  = false;  // vfat / exfat – typically USB sticks / SD cards
-    bool isNetworkFs  = false;  // nfs, cifs, smb, fuse.sshfs, 9p, virtiofs
+    QString fsType;
+    bool isWindowsFs  = false;
+    bool isLinuxFs    = false;
+    bool isMacFs      = false;
+    bool isRemovable  = false;
+    bool isNetworkFs  = false;  // used by checkByHash to skip high-latency I/O
     bool isReadOnly   = false;
 };
 
@@ -74,51 +73,35 @@ public slots:
 
 signals:
     void scanningPath(const QString& path);
-    void progressUpdated(int percent);                  // 0-99 while running
+    void progressUpdated(int percent);
     void suspiciousFileFound(const SuspiciousFile& file);
     void scanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
     void scanError(const QString& message);
 
 private:
-    // ----- Detection helpers -----
-    bool checkByNameAndExtension(const QString& fileName,
-                                  const QString& lowerName,
-                                  const QString& lowerPath,
-                                  QString& outReason,
-                                  QString& outCategory) const;
-
-    bool checkByLocation(const QString& lowerPath,
-                          const QString& ext,
-                          QString& outReason,
-                          QString& outCategory) const;
-
-    bool checkByMagicBytes(const QString& filePath,
-                            const QString& ext,
-                            QString& outReason,
-                            QString& outCategory) const;
-
+    // ----- Scan loop helpers -----
     bool shouldSkipDirectory(const QString& lowerDirPath) const;
-    bool isTrustedPath(const QString& lowerAbsPath) const;
 
-    // Versioned soname: libfoo.so.1, libfoo.so.2.0.62, etc.
-    static bool isVersionedSharedLib(const QString& lowerFileName, const QString& ext);
+    // ----- Hash-based detection (sole detection method) -----
+    bool checkByHash(const QString& filePath,
+                     const QString& ext,
+                     qint64         fileSize,
+                     QString&       outReason,
+                     QString&       outCategory) const;
 
-    // ----- Context detection & filter construction -----
-    static ScanContext detectContext(const QString& rootPath);
-    void buildFilterLists();
+    // ----- Setup -----
+    static ScanContext              detectContext(const QString& rootPath);
+    void                            buildFilterLists();
+    static QHash<QString, QString>  loadHashDatabase();
 
     // ----- Data -----
     QString     m_rootPath;
     QAtomicInt* m_cancelFlag;
     ScanContext m_ctx;
 
-    QVector<QString> m_highRiskExtensions;
-    QVector<QString> m_suspiciousExtensions;
-    QVector<QString> m_suspiciousNameFragments;
-    QVector<QString> m_knownMalwareNames;
-    QVector<QString> m_skipDirFragments;
-    QVector<QString> m_trustedPathFragments;
-    QVector<QString> m_persistenceDirs;     // populated per-platform in buildFilterLists()
+    QVector<QString>        m_skipDirFragments;   // directories to skip entirely (performance)
+    QSet<QString>           m_noHashExtensions;   // extensions exempt from hashing
+    QHash<QString, QString> m_hashDb;             // sha256 hex → malware name
 };
 
 // ---------------------------------------------------------------------------

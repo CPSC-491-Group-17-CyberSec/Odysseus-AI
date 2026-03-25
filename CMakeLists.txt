@@ -10,16 +10,38 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
+# Copy the malware hash database next to the executable at build time
+file(COPY ${CMAKE_SOURCE_DIR}/data DESTINATION ${CMAKE_BINARY_DIR})
+
 add_executable(main
     src/main.cpp
     src/ui/ui.cpp
     src/ui/MainWindow/MainWindow.cpp
     src/ui/ThreatCard/ThreatCard.cpp
     src/ui/ScanTypeOverlay/ScanTypeOverlay.cpp
-    src/core/FileScanner.cpp
+    # Scanner engine – FileScanner.cpp is the AUTOMOC anchor (includes the header
+    # so CMake generates moc_FileScanner.cpp). All implementations are in the
+    # focused TUs below, compiled with per-file optimization flags.
+    src/core/FileScanner.cpp        # AUTOMOC anchor – do not add code here
+    src/core/FileScannerContext.cpp # OS/FS detection, filter construction, constructor
+    src/core/FileScannerHash.cpp    # hash DB + SHA-256 detection (-O3)
+    src/core/FileScannerEngine.cpp  # doScan loop + FileScanner controller (-O2)
+    # FileScannerDetectors.cpp is excluded – reserved for future detectors
 )
 
 target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network)
+
+# Per-file optimization flags for the hot scanner paths.
+# Applied on top of whatever CMAKE_BUILD_TYPE provides, so Debug builds still
+# get optimized scanner code while UI code remains debuggable.
+set_source_files_properties(
+    src/core/FileScannerHash.cpp
+    PROPERTIES COMPILE_OPTIONS "-O3"
+)
+set_source_files_properties(
+    src/core/FileScannerEngine.cpp
+    PROPERTIES COMPILE_OPTIONS "-O2"
+)
 
 include(GNUInstallDirs)
 
