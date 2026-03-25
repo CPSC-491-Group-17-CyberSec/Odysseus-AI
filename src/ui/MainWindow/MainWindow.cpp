@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "../../core/FileScanner.h"
+#include "../../core/ScanDatabase.h"
 #include "../ThreatCard/ThreatCard.h"
 
 #include <QPushButton>
@@ -105,6 +106,27 @@ MainWindow::MainWindow(QWidget *parent)
     m_nam = new QNetworkAccessManager(this);
     connect(m_nam, &QNetworkAccessManager::finished,
             this,  &MainWindow::onCveLookupReply);
+
+    // Database – open / create the local SQLite store
+    m_db = new ScanDatabase(this);
+    connect(m_db, &ScanDatabase::recordSaved,
+            this, &MainWindow::onDbRecordSaved);
+    connect(m_db, &ScanDatabase::databaseError,
+            this, [](const QString& msg){ qWarning() << "[DB ERROR]" << msg; });
+
+    // Pre-load persisted scan history from SQLite (newest-first)
+    m_history = m_db->loadAllScanRecords();
+    for (const ScanRecord& r : m_history) {
+        QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
+            .arg(r.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
+            .arg(r.suspiciousCount)
+            .arg(r.totalScanned)
+            .arg(formatElapsed(r.elapsedSeconds));
+        auto* hi = new QListWidgetItem(label);
+        hi->setForeground(QBrush(r.suspiciousCount > 0
+                                 ? QColor("#B71C1C") : QColor("#2E7D32")));
+        historyList->addItem(hi);
+    }
 }
 
 MainWindow::~MainWindow()
@@ -1028,6 +1050,10 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     record.elapsedSeconds  = elapsedSeconds;
     record.findings        = m_findings;   // snapshot (CVE fields may still be empty, ok)
     m_history.prepend(record);  // newest first; historyList is rebuilt on demand
+
+    // Persist to SQLite (async – writer thread handles it)
+    if (m_db)
+        m_db->saveScanRecord(record);
 }
 
 void MainWindow::onScanError(const QString& message)
@@ -1148,4 +1174,11 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
     }
 
     showPanel(ActivePanel::HistoryDetail);
+}
+// ============================================================================
+// DATABASE SLOTS
+// ============================================================================
+void MainWindow::onDbRecordSaved(qint64 scanId)
+{
+    qDebug() << "[DB] Scan record saved, rowid =" << scanId;
 }
