@@ -140,10 +140,10 @@ ScanTypeOverlay::ScanTypeOverlay(QWidget* parent)
 
     QFrame* lastCard = makeOptionCard(
         "Scan from Last Point",
-        "Only scan newly added files since last scan (will not check "
-        "previously scanned files).\n\nRequires scan database — coming soon.",
-        "Coming Soon",
-        false
+        "Continue scanning from where the last scan left off. Previously "
+        "scanned clean files are skipped automatically via the scan cache.",
+        "Resume Scan",
+        true
     );
 
     optRow->addWidget(fullCard);
@@ -154,6 +154,7 @@ ScanTypeOverlay::ScanTypeOverlay(QWidget* parent)
     // ---- Wire buttons -------------------------------------------------------
     QPushButton* fullBtn    = fullCard->findChild<QPushButton*>();
     QPushButton* partialBtn = partialCard->findChild<QPushButton*>();
+    QPushButton* lastBtn    = lastCard->findChild<QPushButton*>();
 
     connect(fullBtn, &QPushButton::clicked, this, [this]() {
         hide();
@@ -171,6 +172,11 @@ ScanTypeOverlay::ScanTypeOverlay(QWidget* parent)
             hide();
             emit partialScanRequested(dir);
         }
+    });
+
+    connect(lastBtn, &QPushButton::clicked, this, [this]() {
+        hide();
+        emit resumeScanRequested();
     });
 
     repositionCard();

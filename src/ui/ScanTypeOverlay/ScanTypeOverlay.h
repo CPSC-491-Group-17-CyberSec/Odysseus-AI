@@ -24,6 +24,7 @@ public:
 signals:
     void fullScanRequested();
     void partialScanRequested(const QString& path);
+    void resumeScanRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

@@ -1,17 +1,24 @@
 // FileScannerHash.cpp
-// SHA-256 hash database loading and hash-based malware detection.
+// SHA-256 hash database loading, hash-based malware detection, and the
+// per-thread hash worker that consumes the work queue produced by doScan().
+//
+// runHashWorker() is called from N QThread::create threads.  It reads only
+// const/atomic data on FileScannerWorker, so no global lock is held during
+// the actual SHA-256 computation.
+//
 // Compiled with -O3: this is the most CPU/IO-intensive path in the scanner.
 
 #include "FileScanner.h"
 
 #include <QFile>
+#include <QFileInfo>
 #include <QCryptographicHash>
 #include <QCoreApplication>
+#include <QMutexLocker>
+#include <QDateTime>
 
 // ============================================================================
 // loadHashDatabase  –  static, called once at worker construction.
-// Searches candidate paths relative to the executable so the file is found
-// both during development (build dir) and after install.
 // ============================================================================
 QHash<QString, QString> FileScannerWorker::loadHashDatabase()
 {
@@ -53,13 +60,13 @@ QHash<QString, QString> FileScannerWorker::loadHashDatabase()
 // ============================================================================
 // checkByHash  –  SHA-256 the file, look it up in the loaded hash database.
 //
-// Skips:
-//   - extensions in m_noHashExtensions (system artefacts / media)
-//   - network filesystems (high-latency I/O)
-//   - files larger than 200 MB (no real malware sample exceeds this)
-//   - empty hash DB (database file not found)
+// This method is const and reads only immutable members (m_hashDb,
+// m_noHashExtensions, m_ctx), making it safe to call from multiple threads
+// simultaneously with no locking.
 //
-// Reads in 64 KB chunks to avoid loading the entire file into memory.
+// Uses memory-mapped I/O for files >= 256 KB (avoids user-space copy buffers;
+// the OS page-cache handles prefetch efficiently on SSDs).  Falls back to
+// chunked reads for smaller files or if mmap fails.
 // ============================================================================
 bool FileScannerWorker::checkByHash(const QString& filePath,
                                      const QString& ext,
@@ -73,7 +80,9 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
     if (m_ctx.isNetworkFs)
         return false;
 
-    constexpr qint64 maxHashBytes = 200LL * 1024 * 1024;
+    constexpr qint64 maxHashBytes   = 200LL * 1024 * 1024;   // 200 MB hard cap
+    constexpr qint64 mmapThreshold  = 256LL * 1024;           // 256 KB mmap crossover
+
     if (fileSize <= 0 || fileSize > maxHashBytes)
         return false;
 
@@ -85,11 +94,26 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
         return false;
 
     QCryptographicHash hasher(QCryptographicHash::Sha256);
-    char buf[65536];
-    while (!f.atEnd()) {
-        const qint64 n = f.read(buf, sizeof(buf));
-        if (n <= 0) break;
-        hasher.addData(QByteArrayView(buf, static_cast<qsizetype>(n)));
+
+    if (fileSize >= mmapThreshold) {
+        // Memory-mapped path: no user-space copy; OS manages page faults.
+        uchar* mapped = f.map(0, fileSize);
+        if (mapped) {
+            hasher.addData(QByteArrayView(mapped, static_cast<qsizetype>(fileSize)));
+            f.unmap(mapped);
+        } else {
+            // mmap failed (e.g. tmpfs with no backing) – fall through to read.
+            goto chunked_read;
+        }
+    } else {
+        chunked_read:
+        // Chunked-read path for small files or mmap fallback.
+        char buf[65536];
+        while (!f.atEnd()) {
+            const qint64 n = f.read(buf, sizeof(buf));
+            if (n <= 0) break;
+            hasher.addData(QByteArrayView(buf, static_cast<qsizetype>(n)));
+        }
     }
     f.close();
 
@@ -104,4 +128,76 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
     }
 
     return false;
+}
+
+// ============================================================================
+// runHashWorker  –  consumer half of the producer-consumer pipeline.
+//
+// Called from N threads created by QThread::create inside doScan().
+// Drains the work queue until both:
+//   (a) the queue is empty, AND
+//   (b) the enumeration thread has set m_enumDone = true
+// or a cancellation is requested.
+//
+// Findings are emitted via Qt's queued-connection mechanism (thread-safe).
+// Clean-file cache entries are accumulated locally and merged under a
+// fine-grained mutex at the end to minimise contention.
+// ============================================================================
+void FileScannerWorker::runHashWorker()
+{
+    QVector<CacheEntry> localCache;
+
+    for (;;) {
+        FileWorkItem item;
+
+        {
+            QMutexLocker lock(&m_workMutex);
+
+            // Wait until there's work, enumeration is done, or scan cancelled.
+            while (m_workQueue.isEmpty()
+                   && !m_enumDone
+                   && m_cancelFlag->loadRelaxed() == 0)
+            {
+                m_workHasItems.wait(&m_workMutex);
+            }
+
+            // Exit conditions: queue drained after enumeration, or cancelled.
+            if (m_workQueue.isEmpty())
+                break;
+
+            item = m_workQueue.dequeue();
+            // Signal the producer that there's space again.
+            m_workHasSpace.wakeOne();
+        }
+
+        if (m_cancelFlag->loadRelaxed() != 0)
+            break;
+
+        // Count every dequeued file as "scanned".
+        m_totalScanned.fetchAndAddRelaxed(1);
+
+        QString reason, category;
+        if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category)) {
+            SuspiciousFile sf;
+            sf.filePath     = item.filePath;
+            sf.fileName     = QFileInfo(item.filePath).fileName();
+            sf.reason       = reason;
+            sf.category     = category;
+            sf.sizeBytes    = item.fileSize;
+            sf.lastModified = QDateTime::fromString(item.lastModified, Qt::ISODate);
+
+            // Thread-safe: queued connection delivers to the UI thread.
+            emit suspiciousFileFound(sf);
+            m_suspiciousCount.fetchAndAddRelaxed(1);
+        } else {
+            // File is clean – record for incremental-scan cache.
+            localCache.append({ item.filePath, item.lastModified });
+        }
+    }
+
+    // Merge this worker's clean-file entries into the shared buffer.
+    if (!localCache.isEmpty()) {
+        QMutexLocker lock(&m_cacheMutex);
+        m_sharedCacheUpdates.append(std::move(localCache));
+    }
 }

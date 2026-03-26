@@ -81,6 +81,11 @@ public:
     // Call occasionally (e.g. after every 5th scan) to prevent stale growth.
     void pruneStaleCache();
 
+    // Last scan root path (used by "Scan from Last Point").
+    // Stored in the scan_state key-value table.
+    QString loadLastScanRoot() const;
+    void    saveLastScanRoot(const QString& rootPath);  // async
+
     // Full path to the SQLite file (useful for diagnostics).
     QString databasePath() const { return m_dbPath; }
 

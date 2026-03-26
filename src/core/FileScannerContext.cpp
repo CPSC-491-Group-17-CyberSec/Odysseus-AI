@@ -123,10 +123,12 @@ void FileScannerWorker::buildFilterLists()
 FileScannerWorker::FileScannerWorker(const QString&          rootPath,
                                      QAtomicInt*             cancelFlag,
                                      QHash<QString, QString> scanCache,
+                                     const QString&          resumeFromDir,
                                      QObject*                parent)
     : QObject(parent)
     , m_rootPath(rootPath)
     , m_cancelFlag(cancelFlag)
+    , m_resumeFromDir(resumeFromDir)
     , m_scanCache(std::move(scanCache))
 {
     m_ctx    = detectContext(rootPath);

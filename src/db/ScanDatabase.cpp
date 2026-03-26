@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS scan_cache (
 );
 )sql";
 
+// Key-value table for persistent scanner state (e.g. last scan root).
+static const char* kCreateStateTable = R"sql(
+CREATE TABLE IF NOT EXISTS scan_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+)sql";
+
 static const char* kPragmas = R"sql(
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -212,6 +220,10 @@ bool ScanDatabase::createSchema(sqlite3* db)
     }
     if (!execSql(db, kCreateCacheTable, &err)) {
         qWarning() << "ScanDatabase::createSchema cache table:" << err;
+        return false;
+    }
+    if (!execSql(db, kCreateStateTable, &err)) {
+        qWarning() << "ScanDatabase::createSchema state table:" << err;
         return false;
     }
     return true;
@@ -576,6 +588,52 @@ void ScanDatabase::pruneStaleCache()
 }
 
 // ============================================================================
+// loadLastScanRoot  (synchronous, UI thread)
+// Returns the root path used in the most recently saved scan, or empty if none.
+// ============================================================================
+QString ScanDatabase::loadLastScanRoot() const
+{
+    if (!m_readDb)
+        return {};
+
+    const char* sql = "SELECT value FROM scan_state WHERE key = 'last_scan_root';";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_readDb, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return {};
+
+    QString result;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* val = sqlite3_column_text(stmt, 0);
+        if (val)
+            result = QString::fromUtf8(reinterpret_cast<const char*>(val));
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+// ============================================================================
+// saveLastScanRoot  (async – writer thread)
+// Upserts the 'last_scan_root' key so "Scan from Last Point" knows where to start.
+// ============================================================================
+void ScanDatabase::saveLastScanRoot(const QString& rootPath)
+{
+    if (rootPath.isEmpty())
+        return;
+
+    QString copy = rootPath;
+    enqueueWrite([copy](sqlite3* db) {
+        const char* sql =
+            "INSERT OR REPLACE INTO scan_state (key, value) VALUES ('last_scan_root', ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+            return;
+        bindText(stmt, 1, copy);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    });
+}
+
+// ============================================================================
 // WriterThread
 // ============================================================================
 ScanDatabase::WriterThread::WriterThread(const QString& dbPath, ScanDatabase* owner)
@@ -622,6 +680,8 @@ void ScanDatabase::WriterThread::run()
     // Ensure schema exists on this connection too (handles first-run race).
     execSql(db, kCreateScansTable);
     execSql(db, kCreateFindingsTable);
+    execSql(db, kCreateCacheTable);
+    execSql(db, kCreateStateTable);
 
     qDebug() << "ScanDatabase WriterThread: started, db =" << m_dbPath;
 
