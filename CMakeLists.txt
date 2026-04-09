@@ -26,14 +26,46 @@ add_executable(main
     src/core/FileScannerContext.cpp # OS/FS detection, filter construction, constructor
     src/core/FileScannerHash.cpp    # hash DB + SHA-256 detection (-O3)
     src/core/FileScannerEngine.cpp  # doScan loop + FileScanner controller (-O2)
-    # FileScannerDetectors.cpp is excluded – reserved for future detectors
-    src/db/ScanDatabase.cpp       # SQLite persistence layer
-    src/db/sqlite3.c              # SQLite amalgamation – no install required
+    src/core/FileScannerDetectors.cpp  # AI anomaly detection pass
+    # AI / ML subsystem
+    src/ai/FeatureExtractor.cpp    # 38-feature vector extraction
+    src/ai/AnomalyDetector.cpp     # ONNX Runtime inference wrapper
+    src/db/ScanDatabase.cpp        # SQLite persistence layer
+    src/db/sqlite3.c               # SQLite amalgamation – no install required
 )
 
-target_include_directories(main PRIVATE src/core)
+target_include_directories(main PRIVATE
+    src/core
+    include           # ai/FeatureExtractor.h, ai/AnomalyDetector.h
+)
 
 target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network)
+
+# -----------------------------
+# ONNX Runtime (optional – AI anomaly detection)
+# -----------------------------
+# If ONNX Runtime is installed, find and link it.  If not, the build still
+# succeeds: AnomalyDetector.cpp compiles a stub that disables AI scoring.
+find_package(onnxruntime QUIET)
+if(onnxruntime_FOUND)
+    target_link_libraries(main PRIVATE onnxruntime::onnxruntime)
+    message(STATUS "ONNX Runtime found – AI anomaly detection enabled")
+else()
+    # Try pkg-config as fallback
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(ONNXRT QUIET libonnxruntime)
+        if(ONNXRT_FOUND)
+            target_include_directories(main PRIVATE ${ONNXRT_INCLUDE_DIRS})
+            target_link_libraries(main PRIVATE ${ONNXRT_LIBRARIES})
+            message(STATUS "ONNX Runtime found via pkg-config – AI anomaly detection enabled")
+        endif()
+    endif()
+    if(NOT ONNXRT_FOUND)
+        message(STATUS "ONNX Runtime NOT found – AI anomaly detection will be disabled "
+                       "(hash-only mode). Install onnxruntime to enable.")
+    endif()
+endif()
 
 # Per-file optimization flags for the hot scanner paths.
 # Applied on top of whatever CMAKE_BUILD_TYPE provides, so Debug builds still

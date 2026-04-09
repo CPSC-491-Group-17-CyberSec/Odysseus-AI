@@ -13,6 +13,15 @@
 #include <QWaitCondition>
 
 // ---------------------------------------------------------------------------
+// AI-based anomaly detector  –  called from runHashWorker() as a second pass
+// after hash-based detection.  Defined in FileScannerDetectors.cpp.
+// ---------------------------------------------------------------------------
+bool checkByAI(const QString& filePath,
+               qint64         fileSize,
+               QString&       outReason,
+               QString&       outCategory);
+
+// ---------------------------------------------------------------------------
 // SuspiciousFile  –  one flagged file
 // ---------------------------------------------------------------------------
 struct SuspiciousFile

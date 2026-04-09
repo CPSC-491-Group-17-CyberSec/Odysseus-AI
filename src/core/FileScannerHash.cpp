@@ -177,7 +177,18 @@ void FileScannerWorker::runHashWorker()
         m_totalScanned.fetchAndAddRelaxed(1);
 
         QString reason, category;
+        bool flagged = false;
+
+        // --- Detection pass 1: known-hash lookup ---
         if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category)) {
+            flagged = true;
+        }
+        // --- Detection pass 2: AI anomaly scoring (fallback) ---
+        else if (checkByAI(item.filePath, item.fileSize, reason, category)) {
+            flagged = true;
+        }
+
+        if (flagged) {
             SuspiciousFile sf;
             sf.filePath     = item.filePath;
             sf.fileName     = QFileInfo(item.filePath).fileName();
