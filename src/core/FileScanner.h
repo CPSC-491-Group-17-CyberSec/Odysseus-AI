@@ -36,6 +36,7 @@ struct SuspiciousFile
     float     cveScore   = 0.0f;    // CVSS base score from NVD (0 = not found)
     qint64    sizeBytes  = 0;
     QDateTime lastModified;
+    QString   aiExplanation;  // LLM-generated threat explanation (async, may be empty initially)
 };
 
 // ---------------------------------------------------------------------------

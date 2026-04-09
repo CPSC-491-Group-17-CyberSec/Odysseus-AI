@@ -30,6 +30,7 @@ add_executable(main
     # AI / ML subsystem
     src/ai/FeatureExtractor.cpp    # 38-feature vector extraction
     src/ai/AnomalyDetector.cpp     # ONNX Runtime inference wrapper
+    src/ai/LLMExplainer.cpp        # Ollama-based LLM threat explanation
     src/db/ScanDatabase.cpp        # SQLite persistence layer
     src/db/sqlite3.c               # SQLite amalgamation – no install required
 )
