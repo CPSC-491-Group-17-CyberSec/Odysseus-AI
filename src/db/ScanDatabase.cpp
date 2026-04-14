@@ -53,11 +53,38 @@ CREATE TABLE IF NOT EXISTS scan_findings (
 // Enable WAL mode and foreign keys for all new connections.
 static const char* kCreateCacheTable = R"sql(
 CREATE TABLE IF NOT EXISTS scan_cache (
-    file_path       TEXT    PRIMARY KEY,
-    last_modified   TEXT    NOT NULL,
-    last_scanned_at TEXT    NOT NULL
+    file_path             TEXT    PRIMARY KEY,
+    last_modified         TEXT    NOT NULL,
+    last_scanned_at       TEXT    NOT NULL,
+    file_size             INTEGER NOT NULL DEFAULT 0,
+    scan_result           TEXT    NOT NULL DEFAULT 'clean',
+    reason                TEXT,
+    category              TEXT,
+    classification_level  TEXT,
+    severity_level        TEXT,
+    anomaly_score         REAL    DEFAULT 0,
+    ai_summary            TEXT,
+    key_indicators        TEXT,
+    recommended_actions   TEXT
 );
 )sql";
+
+// Migration: add new columns to an existing scan_cache table.
+// ALTER TABLE … ADD COLUMN is idempotent in practice – we ignore errors
+// when the column already exists.
+static const char* kMigrateCacheColumns[] = {
+    "ALTER TABLE scan_cache ADD COLUMN file_size             INTEGER NOT NULL DEFAULT 0;",
+    "ALTER TABLE scan_cache ADD COLUMN scan_result           TEXT    NOT NULL DEFAULT 'clean';",
+    "ALTER TABLE scan_cache ADD COLUMN reason                TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN category              TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN classification_level  TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN severity_level        TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN anomaly_score         REAL    DEFAULT 0;",
+    "ALTER TABLE scan_cache ADD COLUMN ai_summary            TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN key_indicators        TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN recommended_actions   TEXT;",
+    nullptr
+};
 
 // Key-value table for persistent scanner state (e.g. last scan root).
 static const char* kCreateStateTable = R"sql(
@@ -222,6 +249,11 @@ bool ScanDatabase::createSchema(sqlite3* db)
         qWarning() << "ScanDatabase::createSchema cache table:" << err;
         return false;
     }
+    // Migrate existing scan_cache tables that lack the v2 columns.
+    // Errors are expected (column already exists) and silently ignored.
+    for (int i = 0; kMigrateCacheColumns[i]; ++i)
+        execSql(db, kMigrateCacheColumns[i]);
+
     if (!execSql(db, kCreateStateTable, &err)) {
         qWarning() << "ScanDatabase::createSchema state table:" << err;
         return false;
@@ -478,40 +510,73 @@ QVector<ScanRecord> ScanDatabase::loadRecentScanHeaders(int n) const
 
 // ============================================================================
 // loadScanCache  (synchronous, UI thread)
-// Returns path → lastModified for every row in scan_cache.
-// Typical call time: <50ms even with 500k rows.
+// Returns path → CacheEntry for every row in scan_cache.
+// Extended (v2): includes flagged-file metadata for result replay.
+// Typical call time: <100ms even with 500k rows.
 // ============================================================================
-QHash<QString, QString> ScanDatabase::loadScanCache() const
+QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
 {
-    QHash<QString, QString> cache;
+    QHash<QString, CacheEntry> cache;
     if (!m_readDb)
         return cache;
 
-    const char* sql = "SELECT file_path, last_modified FROM scan_cache;";
+    const char* sql =
+        "SELECT file_path, last_modified, file_size, scan_result, "
+        "       reason, category, classification_level, severity_level, "
+        "       anomaly_score, ai_summary, key_indicators, recommended_actions "
+        "FROM scan_cache;";
+
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_readDb, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         qWarning() << "loadScanCache: prepare failed:" << sqlite3_errmsg(m_readDb);
         return cache;
     }
 
+    auto colText = [&](int c) -> QString {
+        const unsigned char* txt = sqlite3_column_text(stmt, c);
+        return txt ? QString::fromUtf8(reinterpret_cast<const char*>(txt)) : QString{};
+    };
+
+    int nClean = 0, nFlagged = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const unsigned char* path = sqlite3_column_text(stmt, 0);
-        const unsigned char* mod  = sqlite3_column_text(stmt, 1);
-        if (path && mod)
-            cache.insert(
-                QString::fromUtf8(reinterpret_cast<const char*>(path)),
-                QString::fromUtf8(reinterpret_cast<const char*>(mod))
-            );
+        CacheEntry e;
+        e.filePath     = colText(0);
+        e.lastModified = colText(1);
+        e.fileSize     = sqlite3_column_int64(stmt, 2);
+        e.isFlagged    = (colText(3) == QStringLiteral("flagged"));
+
+        if (e.isFlagged) {
+            e.reason              = colText(4);
+            e.category            = colText(5);
+            e.classificationLevel = colText(6);
+            e.severityLevel       = colText(7);
+            e.anomalyScore        = static_cast<float>(sqlite3_column_double(stmt, 8));
+            e.aiSummary           = colText(9);
+            // key_indicators and recommended_actions stored as newline-delimited text
+            QString ki = colText(10);
+            if (!ki.isEmpty())
+                e.keyIndicators = ki.split('\n', Qt::SkipEmptyParts);
+            QString ra = colText(11);
+            if (!ra.isEmpty())
+                e.recommendedActions = ra.split('\n', Qt::SkipEmptyParts);
+            ++nFlagged;
+        } else {
+            ++nClean;
+        }
+
+        if (!e.filePath.isEmpty())
+            cache.insert(e.filePath, e);
     }
     sqlite3_finalize(stmt);
 
-    qDebug() << "loadScanCache: loaded" << cache.size() << "entries";
+    qDebug() << "loadScanCache: loaded" << cache.size() << "entries"
+             << "(" << nClean << "clean," << nFlagged << "flagged)";
     return cache;
 }
 
 // ============================================================================
 // flushScanCache  (async – writer thread)
-// Upserts all clean-file entries from the just-completed scan.
+// Upserts scan-result entries (both clean and flagged) from the scan.
 // Uses INSERT OR REPLACE so re-scanned files update their timestamp.
 // ============================================================================
 void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
@@ -525,22 +590,40 @@ void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
 
     enqueueWrite([copy, now](sqlite3* db) {
         const char* sql =
-            "INSERT OR REPLACE INTO scan_cache (file_path, last_modified, last_scanned_at) "
-            "VALUES (?, ?, ?);";
+            "INSERT OR REPLACE INTO scan_cache "
+            "(file_path, last_modified, last_scanned_at, file_size, scan_result, "
+            " reason, category, classification_level, severity_level, "
+            " anomaly_score, ai_summary, key_indicators, recommended_actions) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
         execSql(db, "BEGIN;");
+        int nClean = 0, nFlagged = 0;
         for (const CacheEntry& e : copy) {
             sqlite3_stmt* stmt = nullptr;
             if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
                 continue;
-            bindText(stmt, 1, e.filePath);
-            bindText(stmt, 2, e.lastModified);
-            bindText(stmt, 3, now);
+            bindText (stmt,  1, e.filePath);
+            bindText (stmt,  2, e.lastModified);
+            bindText (stmt,  3, now);
+            bindInt64(stmt,  4, e.fileSize);
+            bindText (stmt,  5, e.isFlagged ? QStringLiteral("flagged")
+                                            : QStringLiteral("clean"));
+            bindText (stmt,  6, e.reason);
+            bindText (stmt,  7, e.category);
+            bindText (stmt,  8, e.classificationLevel);
+            bindText (stmt,  9, e.severityLevel);
+            sqlite3_bind_double(stmt, 10, static_cast<double>(e.anomalyScore));
+            bindText (stmt, 11, e.aiSummary);
+            bindText (stmt, 12, e.keyIndicators.join('\n'));
+            bindText (stmt, 13, e.recommendedActions.join('\n'));
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
+
+            if (e.isFlagged) ++nFlagged; else ++nClean;
         }
         execSql(db, "COMMIT;");
-        qDebug() << "flushScanCache: upserted" << copy.size() << "entries";
+        qDebug() << "flushScanCache: upserted" << copy.size() << "entries"
+                 << "(" << nClean << "clean," << nFlagged << "flagged)";
     });
 }
 
@@ -681,6 +764,8 @@ void ScanDatabase::WriterThread::run()
     execSql(db, kCreateScansTable);
     execSql(db, kCreateFindingsTable);
     execSql(db, kCreateCacheTable);
+    for (int i = 0; kMigrateCacheColumns[i]; ++i)
+        execSql(db, kMigrateCacheColumns[i]);
     execSql(db, kCreateStateTable);
 
     qDebug() << "ScanDatabase WriterThread: started, db =" << m_dbPath;

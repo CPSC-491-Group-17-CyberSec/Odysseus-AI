@@ -27,6 +27,7 @@
 #endif
 
 #include <iostream>
+#include <iomanip>
 #include <algorithm>
 
 // ============================================================================
@@ -166,6 +167,35 @@ float AnomalyDetector::score(const std::vector<float>& features) const
             m_impl->outputNamePtrs.data(),
             m_impl->outputNamePtrs.size());
 
+        // ── Diagnostic: dump all output tensors ────────────────────────
+        // This logging is critical for diagnosing score pipeline issues.
+        // Set ODYSSEUS_DIAG=1 env var to enable, or always enable in debug.
+        bool diagEnabled = true;  // TODO: gate behind env var for production
+        if (diagEnabled && !outputTensors.empty()) {
+            std::cout << "[DIAG:ONNX] " << outputTensors.size() << " output tensor(s)";
+            for (size_t t = 0; t < outputTensors.size(); ++t) {
+                auto ti = outputTensors[t].GetTypeInfo();
+                auto si = ti.GetTensorTypeAndShapeInfo();
+                auto shape = si.GetShape();
+                const float* td = outputTensors[t].GetTensorData<float>();
+                size_t n = 1;
+                for (auto s : shape) n *= s;
+                std::cout << "  |  output[" << t << "] shape=[";
+                for (size_t i = 0; i < shape.size(); ++i) {
+                    if (i > 0) std::cout << ",";
+                    std::cout << shape[i];
+                }
+                std::cout << "] vals=[";
+                for (size_t i = 0; i < std::min(n, size_t(8)); ++i) {
+                    if (i > 0) std::cout << ", ";
+                    std::cout << std::fixed << std::setprecision(6) << td[i];
+                }
+                if (n > 8) std::cout << " ...";
+                std::cout << "]";
+            }
+            std::cout << std::endl;
+        }
+
         // The model should output probabilities.
         // For sklearn classifiers exported via skl2onnx, output[1] is typically
         // the probability map {0: p_benign, 1: p_malicious}.
@@ -186,9 +216,22 @@ float AnomalyDetector::score(const std::vector<float>& features) const
             for (auto s : shape) numProbs *= s;
 
             if (numProbs >= 2) {
-                // Return probability of class 1 (malicious)
-                return std::clamp(probs[1], 0.0f, 1.0f);
+                float pBenign    = probs[0];
+                float pMalicious = probs[1];
+                if (diagEnabled) {
+                    std::cout << "[DIAG:ONNX] p(benign)=" << std::fixed
+                              << std::setprecision(6) << pBenign
+                              << "  p(malicious)=" << pMalicious
+                              << "  RETURNING=" << std::clamp(pMalicious, 0.0f, 1.0f)
+                              << std::endl;
+                }
+                return std::clamp(pMalicious, 0.0f, 1.0f);
             } else if (numProbs == 1) {
+                if (diagEnabled) {
+                    std::cout << "[DIAG:ONNX] single-prob output="
+                              << std::fixed << std::setprecision(6) << probs[0]
+                              << std::endl;
+                }
                 return std::clamp(probs[0], 0.0f, 1.0f);
             }
         }
@@ -196,6 +239,11 @@ float AnomalyDetector::score(const std::vector<float>& features) const
         // Fallback: single output tensor
         if (!outputTensors.empty()) {
             const float* data = outputTensors[0].GetTensorData<float>();
+            if (diagEnabled) {
+                std::cout << "[DIAG:ONNX] fallback single-tensor output="
+                          << std::fixed << std::setprecision(6) << data[0]
+                          << std::endl;
+            }
             return std::clamp(data[0], 0.0f, 1.0f);
         }
 

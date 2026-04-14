@@ -42,13 +42,15 @@ public:
     bool isAvailable() const;
 
     /// Generate a synchronous explanation for a flagged file.
-    /// @param filePath     Path to the suspicious file
-    /// @param features     The 38-element feature vector
-    /// @param anomalyScore The ML model's anomaly score (0.0–1.0)
+    /// @param filePath            Path to the suspicious file
+    /// @param features            The 38-element feature vector
+    /// @param anomalyScore        The ML model's anomaly score (0.0–1.0)
+    /// @param classificationLevel "Anomalous", "Suspicious", or "CRITICAL"
     /// @return Human-readable explanation, or error message on failure
     std::string explain(const std::string& filePath,
                         const std::vector<float>& features,
-                        float anomalyScore) const;
+                        float anomalyScore,
+                        const std::string& classificationLevel = "Suspicious") const;
 
     /// Async version: explanation delivered via callback on completion.
     /// The callback is invoked from a background thread.
@@ -56,12 +58,14 @@ public:
     void explainAsync(const std::string& filePath,
                       const std::vector<float>& features,
                       float anomalyScore,
-                      ExplainCallback callback) const;
+                      ExplainCallback callback,
+                      const std::string& classificationLevel = "Suspicious") const;
 
     /// Build the prompt that gets sent to the LLM (exposed for testing)
     std::string buildPrompt(const std::string& filePath,
                             const std::vector<float>& features,
-                            float anomalyScore) const;
+                            float anomalyScore,
+                            const std::string& classificationLevel = "Suspicious") const;
 
     /// Update configuration (e.g. change model or URL)
     void setConfig(const Config& config);

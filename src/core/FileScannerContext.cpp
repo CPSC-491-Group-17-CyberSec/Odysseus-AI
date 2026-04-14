@@ -70,12 +70,73 @@ void FileScannerWorker::buildFilterLists()
     const bool macCtx = m_ctx.isMacFs     || m_ctx.runningOnMac;
     const bool winCtx = m_ctx.isWindowsFs || m_ctx.isRemovable || m_ctx.runningOnWindows;
 
-    // ---- Directories to skip entirely (never contain real files worth hashing)
+    // ---- Directories to skip entirely ----
+    // System virtual dirs, package caches, version control, and build artifacts.
+    // Build directories contain compiled objects and generated files that
+    // trigger false positives and have no security value to scan.
     m_skipDirFragments = {
         "/node_modules/",
         "/.git/",
         "/.local/share/trash",
-        "/.trash"
+        "/.trash",
+
+        // Build artifacts and generated files
+        "/build/",
+        "/cmake-build-",            // CLion build dirs (cmake-build-debug, etc.)
+        "/CMakeFiles/",
+        "/__pycache__/",
+        "/.pytest_cache/",
+        "/.mypy_cache/",
+        "/.tox/",
+        "/.venv/",
+        "/venv/",
+        "/env/",
+        "/.eggs/",
+        "/.build/",                 // Swift build dir
+        "/target/",                 // Rust/Maven build dir
+        "/out/",                    // Gradle/Android build dir
+        "/dist/",                   // JS/Python dist
+        "/.next/",                  // Next.js build
+        "/.nuxt/",                  // Nuxt.js build
+
+        // IDE metadata
+        "/.idea/",
+        "/.vscode/",
+        "/.vs/",
+        "/xcuserdata/",
+        "/.gradle/",
+
+        // ── Package manager / vendor directories (high false-positive noise) ──
+        "/site-packages/",          // Python pip-installed packages
+        "/vendor/",                 // Go, Ruby, PHP vendor deps
+        "/Pods/",                   // CocoaPods (macOS/iOS)
+        "/Carthage/",              // Carthage (macOS/iOS)
+        "/.pub-cache/",            // Dart/Flutter
+        "/.npm/",                  // npm cache
+        "/.yarn/",                 // Yarn cache
+
+        // ── Packaged application resources (low scan value) ──
+        "/.app/Contents/Resources/",  // macOS .app bundle resources
+        "/.app/Contents/Frameworks/", // macOS .app embedded frameworks
+        "/Resources/",                // General app resources
+        "/.chrome/",                  // Chrome profile data
+        "/.mozilla/",                 // Firefox profile data
+        "/Extensions/",              // Browser/app extensions
+
+        // ── Chromium / Electron internals (high entropy by design) ──
+        "/Chromium Embedded Framework/",  // CEF in Spotify, Slack, etc.
+        "/Code Cache/",                   // Chrome/Chromium compiled JS cache
+        "/Electron/",                     // Electron framework dir
+        "/nwjs/",                         // NW.js (Node-Webkit) framework
+        "/CefSharp/",                     // CefSharp .NET browser control
+        "/Service Worker/",              // Chrome service worker cache
+
+        // ── Runtime / managed code artifacts ──
+        "/.cargo/registry",         // Rust crate cache
+        "/gems/",                   // Ruby gems
+        "/.m2/repository",          // Maven local cache
+        "/.nuget/",                 // .NET NuGet cache
+        "/.cache/go-build",         // Go build cache
     };
 
     if (linCtx) {
@@ -86,13 +147,34 @@ void FileScannerWorker::buildFilterLists()
             "/pressure-vessel", "/pv-runtime",
             "/.cache/pip", "/.cache/yarn",
             "/.cache/npm", "/.cache/cargo",
-            "/go/pkg/mod/cache"
+            "/go/pkg/mod/cache",
+            // System managed libraries (dpkg / rpm territory)
+            "/usr/lib/python",             // system Python packages
+            "/usr/share/",                 // man pages, icons, docs
+            "/usr/lib/x86_64-linux-gnu/",  // system shared libs
+            "/usr/lib/aarch64-linux-gnu/",
+            "/snap/",                      // snap-packaged apps
         });
     }
     if (macCtx) {
         m_skipDirFragments.append({
             "/system/library/caches", "/private/var/vm",
-            "/.spotlight-v100", "/.fseventsd", "/.mobilebackups"
+            "/.spotlight-v100", "/.fseventsd", "/.mobilebackups",
+            // macOS packaged app internals (massive false-positive source)
+            "/Library/Application Support/",
+            "/Contents/MacOS/",         // app binary dir (managed by Gatekeeper)
+            "/Contents/_CodeSignature/",
+            "/Contents/Frameworks/",
+            "/Contents/PlugIns/",
+            // Homebrew (installed & managed packages)
+            "/usr/local/Cellar/",
+            "/opt/homebrew/Cellar/",
+            "/usr/local/lib/",
+            "/opt/homebrew/lib/",
+            // Xcode
+            "/Xcode.app/",
+            "/DerivedData/",
+            "/Developer/Platforms/",
         });
     }
     if (winCtx) {
@@ -107,24 +189,40 @@ void FileScannerWorker::buildFilterLists()
     // These types will never appear in a malware hash database and are too
     // numerous to hash without adding significant I/O overhead.
     m_noHashExtensions = {
-        "so", "ko", "o", "a", "pyc", "pyo",
+        // Compiled objects and libraries
+        "so", "ko", "o", "a", "pyc", "pyo", "pyd",
+        "class", "obj", "lib", "lo", "la",
+        // Fonts
         "ttf", "otf", "woff", "woff2",
-        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp",
-        "mp3", "wav", "flac", "ogg",
+        // Images
+        "png", "jpg", "jpeg", "gif", "bmp", "ico", "svg", "webp", "tiff",
+        // Audio
+        "mp3", "wav", "flac", "ogg", "aac", "m4a",
+        // Video
         "mp4", "avi", "mkv", "mov", "webm",
+        // Databases
         "db", "sqlite", "sqlite3",
-        "log"
+        // Logs & data
+        "log", "csv", "tsv",
+        // macOS-specific assets
+        "nib", "storyboardc", "car",  // Interface Builder + asset catalogs
+        "strings", "plist",            // property lists
+        "tbd",                         // text-based stub libraries
+        "modulemap",                   // Clang module maps
+        // Chromium/Electron resources
+        "pak",                         // Chromium resource pack
+        "asar",                        // Electron archive
     };
 }
 
 // ============================================================================
 // FileScannerWorker – constructor
 // ============================================================================
-FileScannerWorker::FileScannerWorker(const QString&          rootPath,
-                                     QAtomicInt*             cancelFlag,
-                                     QHash<QString, QString> scanCache,
-                                     const QString&          resumeFromDir,
-                                     QObject*                parent)
+FileScannerWorker::FileScannerWorker(const QString&           rootPath,
+                                     QAtomicInt*              cancelFlag,
+                                     QHash<QString, CacheEntry> scanCache,
+                                     const QString&           resumeFromDir,
+                                     QObject*                 parent)
     : QObject(parent)
     , m_rootPath(rootPath)
     , m_cancelFlag(cancelFlag)

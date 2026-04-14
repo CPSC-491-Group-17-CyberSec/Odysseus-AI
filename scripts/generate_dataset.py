@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
+# cache test
 """
 generate_dataset.py  –  Extract 38-feature vectors from sample files.
 
 Usage:
-    python generate_dataset.py --malware-dir ./samples/malware \
-                               --benign-dir  ./samples/benign  \
+    python generate_dataset.py --malware-dir ./samples/malware \\
+                               --benign-dir  ./samples/benign  \\
                                --output      dataset.csv
 
-Each row in the output CSV is:  label, feature_0, feature_1, ..., feature_37
-    label = 0 (benign) or 1 (malicious)
+    # With organized benign directory (from collect_benign_dataset.py):
+    python generate_dataset.py --benign-dir training_data/benign \\
+                               --malware-dir training_data/malware \\
+                               --output dataset_v2.csv
+
+Each row in the output CSV is:  label, file_type, feature_0, ..., feature_37
+    label     = 0 (benign) or 1 (malicious)
+    file_type = pe_binary|script|web_content|text_data|archive|media_binary|other
 
 Feature extraction mirrors the C++ FeatureExtractor exactly so the trained
 model is compatible with the ONNX inference path in the main application.
@@ -46,6 +53,44 @@ EXE_EXTS = {"exe", "com", "scr", "pif", "msi", "elf", "bin", "app", "out"}
 SCRIPT_EXTS = {"bat", "cmd", "ps1", "vbs", "js", "wsh", "wsf", "py", "sh",
                "bash", "pl", "rb", "php", "hta"}
 DLL_EXTS = {"dll", "sys", "drv", "ocx", "so", "dylib"}
+
+# ============================================================================
+# File-type categorization (mirrors FileCategory enum in FileTypeScoring.h)
+# ============================================================================
+FILE_TYPE_MAP = {
+    "pe_binary": {"exe", "dll", "sys", "drv", "ocx", "com", "scr", "pif"},
+    "script": {"py", "sh", "bash", "ps1", "bat", "cmd", "vbs", "js", "wsh",
+               "wsf", "pl", "rb", "php", "lua", "tcl", "zsh", "hta"},
+    "web_content": {"html", "htm", "xhtml", "css", "svg", "xml", "xsl",
+                    "json", "jsx", "tsx", "vue"},
+    "text_data": {"txt", "md", "rst", "csv", "tsv", "log", "cfg", "conf",
+                  "ini", "yaml", "yml", "toml", "c", "cpp", "h", "hpp",
+                  "java", "cs", "go", "rs", "swift", "kt", "ts", "r",
+                  "makefile", "dockerfile", "license"},
+    "archive": {"zip", "gz", "tar", "bz2", "xz", "7z", "rar", "zst", "lz4"},
+    "installer": {"msi", "deb", "rpm", "pkg", "dmg", "appimage", "snap"},
+    "media_binary": {"png", "jpg", "jpeg", "gif", "bmp", "ico", "webp",
+                     "tiff", "mp3", "wav", "flac", "ogg", "aac",
+                     "mp4", "mkv", "avi", "mov", "webm",
+                     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+                     "ttf", "otf", "woff", "woff2"},
+}
+
+_EXT_TO_TYPE = {}
+for _cat, _exts in FILE_TYPE_MAP.items():
+    for _ext in _exts:
+        _EXT_TO_TYPE[_ext] = _cat
+
+
+def categorize_file(file_path: str) -> str:
+    """Determine file-type category from extension."""
+    ext = Path(file_path).suffix.lstrip(".").lower()
+    if not ext:
+        name = Path(file_path).name.lower()
+        if name in ("makefile", "dockerfile", "license", "readme", "changelog"):
+            return "text_data"
+        return "other"
+    return _EXT_TO_TYPE.get(ext, "other")
 
 KNOWN_SECTION_NAMES = {
     ".text", ".rdata", ".data", ".rsrc", ".reloc", ".bss",
@@ -296,42 +341,96 @@ def extract_features(file_path: str) -> list[float]:
 # Main – walk directories and build CSV
 # ============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Generate feature dataset for Odysseus AI training")
-    parser.add_argument("--malware-dir", required=True, help="Directory of malware samples")
-    parser.add_argument("--benign-dir", required=True, help="Directory of benign files")
+    parser = argparse.ArgumentParser(
+        description="Generate feature dataset for Odysseus AI training",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Basic usage with flat directories:
+    python generate_dataset.py --benign-dir samples/benign --malware-dir samples/malware
+
+    # With organized directories from collect_benign_dataset.py:
+    python generate_dataset.py --benign-dir training_data/benign \\
+                               --malware-dir training_data/malware \\
+                               --output dataset_v2.csv
+        """,
+    )
+    parser.add_argument("--malware-dir", help="Directory of malware samples")
+    parser.add_argument("--benign-dir", help="Directory of benign files")
     parser.add_argument("--output", default="dataset.csv", help="Output CSV path")
+    parser.add_argument("--include-path", action="store_true",
+                        help="Include source file path in CSV (for debugging)")
     args = parser.parse_args()
 
-    rows = []
+    if not args.malware_dir and not args.benign_dir:
+        print("ERROR: Provide at least one of --malware-dir or --benign-dir")
+        sys.exit(1)
 
-    for label, directory in [(1, args.malware_dir), (0, args.benign_dir)]:
+    rows = []
+    type_counts = {}  # track file_type distribution
+
+    sources = []
+    if args.benign_dir:
+        sources.append((0, args.benign_dir))
+    if args.malware_dir:
+        sources.append((1, args.malware_dir))
+
+    for label, directory in sources:
         if not os.path.isdir(directory):
             print(f"Warning: {directory} does not exist, skipping")
             continue
 
+        label_name = "benign" if label == 0 else "malicious"
         count = 0
         for root, dirs, files in os.walk(directory):
+            # Skip hidden dirs and common non-useful dirs
+            dirs[:] = [d for d in dirs if not d.startswith(".")
+                       and d.lower() not in ("node_modules", "__pycache__", ".git")]
+
             for fname in files:
+                if fname.startswith("."):
+                    continue
+
                 fpath = os.path.join(root, fname)
                 feats = extract_features(fpath)
                 if feats:
-                    rows.append([label] + feats)
+                    file_type = categorize_file(fpath)
+                    row = [label, file_type] + feats
+                    if args.include_path:
+                        row.append(fpath)
+                    rows.append(row)
+
+                    type_counts[file_type] = type_counts.get(file_type, 0) + 1
                     count += 1
                     if count % 100 == 0:
-                        print(f"  [{label}] Processed {count} files...")
+                        print(f"  [{label_name}] Processed {count} files...")
 
-        print(f"Label {label}: extracted {count} feature vectors from {directory}")
+        print(f"  {label_name}: extracted {count} feature vectors from {directory}")
 
     if not rows:
         print("No features extracted. Check your input directories.")
         sys.exit(1)
 
+    # Write CSV with file_type column
+    header = ["label", "file_type"] + FEATURE_NAMES
+    if args.include_path:
+        header.append("file_path")
+
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["label"] + FEATURE_NAMES)
+        writer.writerow(header)
         writer.writerows(rows)
 
-    print(f"Dataset written to {args.output} ({len(rows)} samples)")
+    # Summary
+    n_benign = sum(1 for r in rows if r[0] == 0)
+    n_malicious = sum(1 for r in rows if r[0] == 1)
+    print(f"\nDataset written to {args.output}")
+    print(f"  Total:     {len(rows)} samples")
+    print(f"  Benign:    {n_benign}")
+    print(f"  Malicious: {n_malicious}")
+    print(f"\n  File-type distribution:")
+    for ft, count in sorted(type_counts.items(), key=lambda x: -x[1]):
+        print(f"    {ft:15s}: {count:5d}")
 
 
 if __name__ == "__main__":

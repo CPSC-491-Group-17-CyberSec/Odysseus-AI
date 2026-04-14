@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QThread>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <QSet>
 #include <QHash>
@@ -12,6 +13,9 @@
 #include <QMutex>
 #include <QWaitCondition>
 
+// Forward-declare for checkByAI parameter
+struct SuspiciousFile;
+
 // ---------------------------------------------------------------------------
 // AI-based anomaly detector  –  called from runHashWorker() as a second pass
 // after hash-based detection.  Defined in FileScannerDetectors.cpp.
@@ -19,7 +23,8 @@
 bool checkByAI(const QString& filePath,
                qint64         fileSize,
                QString&       outReason,
-               QString&       outCategory);
+               QString&       outCategory,
+               SuspiciousFile* outDetails = nullptr);
 
 // ---------------------------------------------------------------------------
 // SuspiciousFile  –  one flagged file
@@ -37,6 +42,15 @@ struct SuspiciousFile
     qint64    sizeBytes  = 0;
     QDateTime lastModified;
     QString   aiExplanation;  // LLM-generated threat explanation (async, may be empty initially)
+
+    // ── AI anomaly detection metadata (populated by checkByAI) ──────────
+    float     anomalyScore    = 0.0f;    // ML model output (0.0–1.0)
+    float     anomalyThreshold = 0.5f;   // effective threshold used
+    QString   severityLevel;             // "Low" / "Medium" / "High" / "CRITICAL"
+    QString   classificationLevel;       // "Anomalous" / "Suspicious" / "CRITICAL"
+    QStringList keyIndicators;           // top contributing factors
+    QString   aiSummary;                 // concise 1-2 sentence explanation
+    QStringList recommendedActions;      // numbered action items
 };
 
 // ---------------------------------------------------------------------------
@@ -46,7 +60,10 @@ struct ScanRecord
 {
     QDateTime           timestamp;
     int                 totalScanned    = 0;
-    int                 suspiciousCount = 0;
+    int                 suspiciousCount = 0;    // total flagged (all non-Clean)
+    int                 criticalCount   = 0;    // Critical verdict
+    int                 suspiciousOnly  = 0;    // Suspicious verdict (not Critical)
+    int                 reviewCount     = 0;    // Anomalous / Needs Review
     int                 elapsedSeconds  = 0;
     QVector<SuspiciousFile> findings;
 };
@@ -55,11 +72,26 @@ struct ScanRecord
 // CacheEntry  –  one row in the scan_cache table
 // Passed into the worker as a pre-loaded QHash so the worker thread never
 // touches the database directly.
+//
+// Extended (v2): stores both clean and flagged file results so subsequent
+// scans can skip re-scanning unchanged files entirely.
 // ---------------------------------------------------------------------------
 struct CacheEntry
 {
     QString filePath;
     QString lastModified;   // Qt::ISODate string – matches QFileInfo::lastModified()
+    qint64  fileSize = 0;
+    bool    isFlagged = false;
+
+    // ── Flagged-file metadata (empty for clean files) ──────────────────
+    QString     reason;
+    QString     category;
+    QString     classificationLevel;  // "Anomalous" / "Suspicious" / "Critical"
+    QString     severityLevel;
+    float       anomalyScore = 0.0f;
+    QString     aiSummary;
+    QStringList keyIndicators;
+    QStringList recommendedActions;
 };
 
 // ---------------------------------------------------------------------------
@@ -101,7 +133,7 @@ class FileScannerWorker : public QObject
 public:
     explicit FileScannerWorker(const QString&              rootPath,
                                QAtomicInt*                 cancelFlag,
-                               QHash<QString, QString>     scanCache,
+                               QHash<QString, CacheEntry>  scanCache,
                                const QString&              resumeFromDir = {},
                                QObject*                    parent        = nullptr);
 
@@ -149,8 +181,8 @@ private:
     QSet<QString>           m_noHashExtensions;
     QHash<QString, QString> m_hashDb;             // sha256 hex → malware name
 
-    // Incremental scan cache (path → lastModified ISO string)
-    QHash<QString, QString> m_scanCache;
+    // Incremental scan cache (path → CacheEntry with result metadata)
+    QHash<QString, CacheEntry> m_scanCache;
 
     // ----- Multi-thread work queue -----
     // Enumeration thread produces FileWorkItems; N hash workers consume them.
@@ -164,6 +196,8 @@ private:
     QAtomicInt              m_totalScanned{0};
     QAtomicInt              m_suspiciousCount{0};
     QAtomicInteger<qint64>  m_bytesScanned{0};
+    QAtomicInt              m_cacheHits{0};
+    QAtomicInt              m_cacheMisses{0};
 
     // Cache updates buffer – written by workers, flushed after all workers join
     QMutex              m_cacheMutex;
@@ -182,8 +216,8 @@ public:
     ~FileScanner() override;
 
     void startScan(const QString& rootPath,
-                   QHash<QString, QString> scanCache   = {},
-                   const QString&          resumeFromDir = {});
+                   QHash<QString, CacheEntry> scanCache = {},
+                   const QString&             resumeFromDir = {});
     void cancelScan();
     bool isRunning() const;
 

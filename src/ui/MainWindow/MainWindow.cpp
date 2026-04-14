@@ -125,14 +125,38 @@ MainWindow::MainWindow(QWidget *parent)
     // Pre-load persisted scan history from SQLite (newest-first)
     m_history = m_db->loadAllScanRecords();
     for (const ScanRecord& r : m_history) {
-        QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
+        // Recompute per-category counts from findings
+        int c = 0, s = 0, rv = 0;
+        for (const SuspiciousFile& sf : r.findings) {
+            QString cls = sf.classificationLevel.toUpper();
+            if (cls == "CRITICAL")        ++c;
+            else if (cls == "SUSPICIOUS") ++s;
+            else                          ++rv;
+        }
+        QStringList cats;
+        if (c > 0)  cats << QString("%1 crit").arg(c);
+        if (s > 0)  cats << QString("%1 susp").arg(s);
+        if (rv > 0) cats << QString("%1 review").arg(rv);
+        QString buckets;
+        if (cats.isEmpty() && r.suspiciousCount > 0)
+            buckets = QString("%1 flagged").arg(r.suspiciousCount);
+        else if (cats.isEmpty())
+            buckets = "clean";
+        else
+            buckets = cats.join(", ");
+
+        QString label = QString("[%1]  %2 / %3 total  (%4)")
             .arg(r.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
-            .arg(r.suspiciousCount)
+            .arg(buckets)
             .arg(r.totalScanned)
             .arg(formatElapsed(r.elapsedSeconds));
         auto* hi = new QListWidgetItem(label);
-        hi->setForeground(QBrush(r.suspiciousCount > 0
-                                 ? QColor("#B71C1C") : QColor("#2E7D32")));
+        QColor color = QColor("#2E7D32");
+        if (c > 0)       color = QColor("#B71C1C");
+        else if (s > 0)  color = QColor("#E65100");
+        else if (rv > 0) color = QColor("#F57F17");
+        else if (r.suspiciousCount > 0) color = QColor("#B71C1C");
+        hi->setForeground(QBrush(color));
         historyList->addItem(hi);
     }
 }
@@ -620,8 +644,41 @@ void MainWindow::addScanFindingToTable(const SuspiciousFile& sf)
         sevText  = "Medium" + scoreStr();   sevColor = QColor("#F57F17");
     } else if (sf.cveSeverity == "LOW") {
         sevText  = "Low" + scoreStr();      sevColor = QColor("#2E7D32");
+    } else if (!sf.classificationLevel.isEmpty()) {
+        // AI Anomaly Detection – use Phase 2 classification level
+        cveConfirmed = false;
+        QString cls = sf.classificationLevel.toUpper();
+        if (cls == "CRITICAL") {
+            sevText = "Critical"; sevColor = QColor("#C62828");
+        } else if (cls == "SUSPICIOUS") {
+            sevText = "Suspicious"; sevColor = QColor("#E65100");
+        } else if (cls == "ANOMALOUS") {
+            sevText = "Needs Review"; sevColor = QColor("#F57F17");
+        } else {
+            sevText = "Low";      sevColor = QColor("#2E7D32");
+        }
+        // Append score if available
+        if (sf.anomalyScore > 0.0f) {
+            sevText += QString(" (%1)").arg(double(sf.anomalyScore), 0, 'f', 3);
+        }
+    } else if (!sf.severityLevel.isEmpty()) {
+        // Legacy fallback: use severity level if classification not available
+        cveConfirmed = false;
+        QString sev = sf.severityLevel.toUpper();
+        if (sev == "CRITICAL") {
+            sevText = "Critical"; sevColor = QColor("#C62828");
+        } else if (sev == "HIGH") {
+            sevText = "High";     sevColor = QColor("#E65100");
+        } else if (sev == "MEDIUM") {
+            sevText = "Medium";   sevColor = QColor("#F57F17");
+        } else {
+            sevText = "Low";      sevColor = QColor("#2E7D32");
+        }
+        if (sf.anomalyScore > 0.0f) {
+            sevText += QString(" (%1)").arg(double(sf.anomalyScore), 0, 'f', 3);
+        }
     } else {
-        // No CVE – derive severity from detection category
+        // No CVE, no AI – derive severity from detection category
         cveConfirmed = false;
         if (sf.category.contains("Known Malware") || sf.category.contains("PE Binary") ||
             sf.category.contains("ELF Binary")    || sf.category.contains("Mach-O")) {
@@ -787,20 +844,90 @@ void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
     detailsTitleLabel->setText(threatName);
 
     if (!filePath.isEmpty()) {
-        // Scan-derived entry
-        detailsDescLabel->setText(
-            "<b>File Path:</b><br>" + filePath + "<br><br>"
-            "<b>Detection Reason:</b><br>" + reason
-        );
-        detailsAILabel->setText(
-            "<b>CVE:</b> " + (cveId.isEmpty() ? "No matching CVE found" : cveId) + "<br><br>"
-            + (cveSummary.isEmpty() ? "" : "<b>NVD Summary:</b><br>" + cveSummary)
-        );
-        detailsMitreLabel->setText(
-            "<b>Vendor:</b> " + vendor + "<br>"
-            "<b>Source:</b> <span style='background-color:#E6F3F5; padding:3px 6px;"
-            " border-radius:4px;'>Odysseus File Scanner</span>"
-        );
+        // Scan-derived entry – check if it has AI metadata
+        int findingIdx = -1;
+        for (int i = 0; i < m_findings.size(); ++i) {
+            if (m_findings[i].filePath == filePath) {
+                findingIdx = i;
+                break;
+            }
+        }
+
+        if (findingIdx >= 0 && (!m_findings[findingIdx].classificationLevel.isEmpty() ||
+                                  !m_findings[findingIdx].severityLevel.isEmpty())) {
+            // AI Anomaly Detection finding – show structured details
+            const SuspiciousFile& sf = m_findings[findingIdx];
+
+            // Use classification level (Phase 2) if available, fall back to severity
+            QString displayLevel = !sf.classificationLevel.isEmpty()
+                                       ? sf.classificationLevel
+                                       : sf.severityLevel;
+            QString levelColor;
+            QString levelUpper = displayLevel.toUpper();
+            if (levelUpper == "CRITICAL")       levelColor = "#C62828";
+            else if (levelUpper == "SUSPICIOUS") levelColor = "#E65100";
+            else if (levelUpper == "HIGH")       levelColor = "#E65100";
+            else if (levelUpper == "ANOMALOUS")  levelColor = "#F57F17";
+            else if (levelUpper == "MEDIUM")     levelColor = "#F57F17";
+            else                                 levelColor = "#2E7D32";
+
+            QString descHtml;
+            descHtml += "<b>File Path:</b><br>" + filePath + "<br><br>";
+            descHtml += QString("<b>Anomaly Score:</b> %1 / 1.000<br>")
+                            .arg(double(sf.anomalyScore), 0, 'f', 3);
+            descHtml += QString("<b>Threshold:</b> %1<br>")
+                            .arg(double(sf.anomalyThreshold), 0, 'f', 3);
+            descHtml += QString("<b>Classification:</b> <span style='color:%1; font-weight:bold;'>%2</span>")
+                            .arg(levelColor)
+                            .arg(displayLevel);
+            detailsDescLabel->setText(descHtml);
+
+            // AI section: summary + indicators
+            QString aiHtml;
+            if (!sf.aiSummary.isEmpty()) {
+                aiHtml += "<b>AI Summary:</b><br>" + sf.aiSummary + "<br><br>";
+            }
+            if (!sf.keyIndicators.isEmpty()) {
+                aiHtml += "<b>Key Indicators:</b><br>";
+                for (const QString& ind : sf.keyIndicators) {
+                    aiHtml += QString::fromUtf8("\u2022 ") + ind + "<br>";
+                }
+            }
+            if (!cveId.isEmpty()) {
+                aiHtml += "<br><b>CVE:</b> " + cveId;
+                if (!cveSummary.isEmpty())
+                    aiHtml += "<br><b>NVD:</b> " + cveSummary;
+            }
+            detailsAILabel->setText(aiHtml);
+
+            // Actions section
+            QString actHtml;
+            if (!sf.recommendedActions.isEmpty()) {
+                actHtml += "<b>Recommended Actions:</b><br>";
+                for (int i = 0; i < sf.recommendedActions.size(); ++i) {
+                    actHtml += QString("%1. %2<br>").arg(i + 1).arg(sf.recommendedActions[i]);
+                }
+            }
+            actHtml += "<br><b>Engine:</b> " + vendor + "<br>"
+                       "<b>Source:</b> <span style='background-color:#E6F3F5; padding:3px 6px;"
+                       " border-radius:4px;'>Odysseus AI Scanner</span>";
+            detailsMitreLabel->setText(actHtml);
+        } else {
+            // Non-AI scan finding (hash-based or other)
+            detailsDescLabel->setText(
+                "<b>File Path:</b><br>" + filePath + "<br><br>"
+                "<b>Detection Reason:</b><br>" + reason
+            );
+            detailsAILabel->setText(
+                "<b>CVE:</b> " + (cveId.isEmpty() ? "No matching CVE found" : cveId) + "<br><br>"
+                + (cveSummary.isEmpty() ? "" : "<b>NVD Summary:</b><br>" + cveSummary)
+            );
+            detailsMitreLabel->setText(
+                "<b>Vendor:</b> " + vendor + "<br>"
+                "<b>Source:</b> <span style='background-color:#E6F3F5; padding:3px 6px;"
+                " border-radius:4px;'>Odysseus File Scanner</span>"
+            );
+        }
     } else {
         // Original static entry
         detailsDescLabel->setText(
@@ -831,20 +958,28 @@ void MainWindow::onCloseDetailsClicked()
 void MainWindow::onSimulateThreatClicked()
 {
     ThreatCard card(this);
-    card.setSeverity(85);
+
+    // Use the new structured API
+    card.setFileName("suspicious_payload.exe");
+    card.setSeverityLevel("High");
+    card.setAnomalyScore(0.847f, 0.500f);
     card.setSummary(
-        "AI analysis indicates this file exhibits suspicious behaviour:\n"
-        "- Attempts to modify startup persistence\n"
-        "- Drops an obfuscated payload\n"
-        "- Connects to a known-bad domain\n"
+        "This file exhibits characteristics consistent with a packed or "
+        "encrypted executable. High entropy and stripped debug info suggest "
+        "deliberate obfuscation to evade signature-based detection."
     );
-    card.setRemediation(
-        "Recommended steps:\n"
-        "1) Quarantine the file immediately.\n"
-        "2) Run a full system scan.\n"
-        "3) Review recent downloads and startup entries.\n"
-        "4) If this is a work machine, notify your security team."
-    );
+    card.setKeyIndicators({
+        "Very high Shannon entropy (7.42/8.0) — suggests encryption or packing",
+        "PE section with very high entropy — likely packed/encrypted code",
+        "No debug information — stripped binary, common in malware",
+        "Anomalous PE section names — possible packer (UPX, Themida)"
+    });
+    card.setRecommendedActions({
+        "Quarantine the file and prevent execution",
+        "Submit file hash to VirusTotal for multi-engine verification",
+        "Review system logs for signs of prior execution",
+        "Scan connected systems for lateral movement indicators"
+    });
     card.exec();
 }
 
@@ -978,7 +1113,7 @@ void MainWindow::startScanForPath(const QString& rootPath)
         m_db->saveLastScanRoot(rootPath);
 
     // Load scan cache and pass it to the worker for incremental scanning.
-    QHash<QString, QString> cache;
+    QHash<QString, CacheEntry> cache;
     if (m_db)
         cache = m_db->loadScanCache();
     m_scanner->startScan(rootPath, std::move(cache));
@@ -1009,26 +1144,58 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
 {
     m_findings.append(file);
 
-    qDebug() << "[SUSPICIOUS]" << file.category
-             << "|" << file.filePath
-             << "|" << file.reason;
+    // Use classification-aware log label instead of always "[SUSPICIOUS]"
+    QString logLabel = "[FLAGGED]";
+    if (!file.classificationLevel.isEmpty()) {
+        QString cls = file.classificationLevel.toUpper();
+        if (cls == "CRITICAL")       logLabel = "[CRITICAL]";
+        else if (cls == "SUSPICIOUS") logLabel = "[SUSPICIOUS]";
+        else if (cls == "ANOMALOUS") logLabel = "[NEEDS REVIEW]";
+    }
+    qDebug().noquote() << logLabel << file.category
+             << "|" << file.filePath;
 
-    // Colour-code in scan panel list
+    // Colour-code in scan panel list – use AI severity if available
     QString prefix = "[!]";
     QColor  bg     = QColor("#FFF8E1");
-    if (file.category.contains("Known Malware") || file.category.contains("PE Binary") ||
-        file.category.contains("ELF Binary")    || file.category.contains("Mach-O")) {
-        prefix = "[CRIT]"; bg = QColor("#FDECEA");
-    } else if (file.category.contains("High-Risk") || file.category.contains("Persistence") ||
-               file.category.contains("Temp")) {
-        prefix = "[HIGH]"; bg = QColor("#FFF3E0");
-    } else if (file.category.contains("Suspicious Name") || file.category.contains("Double-Extension")) {
-        prefix = "[MED]";  bg = QColor("#FFFDE7");
+
+    if (!file.classificationLevel.isEmpty()) {
+        // AI Anomaly Detection – use Phase 2 classification level
+        QString cls = file.classificationLevel.toUpper();
+        if (cls == "CRITICAL")       { prefix = "[CRIT]"; bg = QColor("#FDECEA"); }
+        else if (cls == "SUSPICIOUS"){ prefix = "[SUSP]"; bg = QColor("#FFF3E0"); }
+        else if (cls == "ANOMALOUS") { prefix = "[REV]";  bg = QColor("#FFFDE7"); }
+        else                         { prefix = "[LOW]";  bg = QColor("#F1F8E9"); }
+    } else if (!file.severityLevel.isEmpty()) {
+        // Legacy severity fallback
+        QString sev = file.severityLevel.toUpper();
+        if (sev == "CRITICAL")     { prefix = "[CRIT]"; bg = QColor("#FDECEA"); }
+        else if (sev == "HIGH")    { prefix = "[HIGH]"; bg = QColor("#FFF3E0"); }
+        else if (sev == "MEDIUM")  { prefix = "[MED]";  bg = QColor("#FFFDE7"); }
+        else if (sev == "LOW")     { prefix = "[LOW]";  bg = QColor("#F1F8E9"); }
+    } else {
+        // Legacy / hash-based detection – derive from category
+        if (file.category.contains("Known Malware") || file.category.contains("PE Binary") ||
+            file.category.contains("ELF Binary")    || file.category.contains("Mach-O")) {
+            prefix = "[CRIT]"; bg = QColor("#FDECEA");
+        } else if (file.category.contains("High-Risk") || file.category.contains("Persistence") ||
+                   file.category.contains("Temp")) {
+            prefix = "[HIGH]"; bg = QColor("#FFF3E0");
+        } else if (file.category.contains("Suspicious Name") || file.category.contains("Double-Extension")) {
+            prefix = "[MED]";  bg = QColor("#FFFDE7");
+        }
     }
 
-    QString displayText = QString("%1 %2\n   %3\n   %4")
+    // Build display text with score if available
+    QString scoreInfo;
+    if (file.anomalyScore > 0.0f) {
+        scoreInfo = QString(" [Score: %1]").arg(file.anomalyScore, 0, 'f', 3);
+    }
+
+    QString displayText = QString("%1 %2%3\n   %4\n   %5")
         .arg(prefix)
         .arg(file.fileName)
+        .arg(scoreInfo)
         .arg(file.category)
         .arg(file.filePath.length() > 60
              ? "..." + file.filePath.right(57)
@@ -1045,13 +1212,34 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
     );
     scanResultsList->scrollToBottom();
 
+    // Live tally by classification level
+    int nCrit = 0, nSusp = 0, nReview = 0;
+    for (const SuspiciousFile& f : m_findings) {
+        QString cls = f.classificationLevel.toUpper();
+        if (cls == "CRITICAL")       ++nCrit;
+        else if (cls == "SUSPICIOUS") ++nSusp;
+        else                          ++nReview;
+    }
+    QString tally;
+    if (nCrit > 0)
+        tally += QString("%1 critical").arg(nCrit);
+    if (nSusp > 0) {
+        if (!tally.isEmpty()) tally += ", ";
+        tally += QString("%1 suspicious").arg(nSusp);
+    }
+    if (nReview > 0) {
+        if (!tally.isEmpty()) tally += ", ";
+        tally += QString("%1 needs review").arg(nReview);
+    }
+    if (tally.isEmpty()) tally = "0";
     scanSummaryLabel->setText(
-        QString("%1 suspicious file(s) found so far…").arg(m_findings.size())
+        QString("Findings so far: %1").arg(tally)
     );
 }
 
 void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned)
 {
+    Q_UNUSED(suspiciousCount)   // per-category counts are computed from m_findings instead
     m_scanTimer->stop();
     m_scanActive = false;
 
@@ -1074,7 +1262,17 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     else
         scanStorageLabel->setText("Storage: " + formatBytes(bytesScanned));
 
-    if (suspiciousCount == 0) {
+    // ── Compute per-category counts from findings ──────────────────────
+    int nCrit = 0, nSusp = 0, nReview = 0;
+    for (const SuspiciousFile& sf : m_findings) {
+        QString cls = sf.classificationLevel.toUpper();
+        if (cls == "CRITICAL")        ++nCrit;
+        else if (cls == "SUSPICIOUS") ++nSusp;
+        else                          ++nReview;   // Anomalous or unset
+    }
+    int nActionable = nCrit + nSusp;   // truly suspicious or critical
+
+    if (m_findings.isEmpty()) {
         qDebug() << "Nothing to do";
         scanStatusLabel->setText("Scan complete — nothing suspicious found.");
         scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #2E7D32;");
@@ -1090,30 +1288,56 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     } else {
         qDebug() << "=== Scan Complete ===";
         qDebug() << "Total files scanned:" << totalScanned;
-        qDebug() << "Suspicious files   :" << suspiciousCount;
+        qDebug() << "Critical:" << nCrit << " Suspicious:" << nSusp << " Needs Review:" << nReview;
         for (const SuspiciousFile& sf : m_findings)
-            qDebug() << " " << sf.filePath << "->" << sf.category;
+            qDebug() << " " << sf.filePath << "->" << sf.category << sf.classificationLevel;
 
-        scanStatusLabel->setText(
-            QString("Scan complete — %1 suspicious file(s) found.").arg(suspiciousCount)
-        );
-        scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #B71C1C;");
+        // Build a bucketed status line
+        QStringList parts;
+        if (nCrit > 0)   parts << QString("%1 critical").arg(nCrit);
+        if (nSusp > 0)   parts << QString("%1 suspicious").arg(nSusp);
+        if (nReview > 0)  parts << QString("%1 needs review").arg(nReview);
 
-        scanSummaryLabel->setText(
-            QString("Looking up CVEs for %1 finding(s)...").arg(suspiciousCount)
-        );
+        QString statusText;
+        if (nActionable > 0) {
+            statusText = QString("Scan complete — %1.").arg(parts.join(", "));
+            scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #B71C1C;");
+        } else {
+            // Only "needs review" items — no true threats
+            statusText = QString("Scan complete — %1 file(s) flagged for review (no confirmed threats).")
+                             .arg(nReview);
+            scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #F57F17;");
+        }
+        scanStatusLabel->setText(statusText);
 
-        // Kick off CVE queries (rate-limited: one at a time via m_cveQueryIndex)
-        // We launch them all; the NAM queues them internally.
-        for (int i = 0; i < m_findings.size(); ++i)
-            lookupCveForFinding(i);
+        // Only run CVE queries for Suspicious/Critical findings
+        int cveCount = 0;
+        for (int i = 0; i < m_findings.size(); ++i) {
+            QString cls = m_findings[i].classificationLevel.toUpper();
+            if (cls == "CRITICAL" || cls == "SUSPICIOUS") {
+                lookupCveForFinding(i);
+                ++cveCount;
+            }
+        }
+        if (cveCount > 0) {
+            scanSummaryLabel->setText(
+                QString("Looking up CVEs for %1 finding(s)...").arg(cveCount)
+            );
+        } else {
+            scanSummaryLabel->setText(
+                QString("%1 file(s) flagged for review — no CVE lookup needed.").arg(nReview)
+            );
+        }
     }
 
     // Save to history regardless
     ScanRecord record;
     record.timestamp       = QDateTime::currentDateTime();
     record.totalScanned    = totalScanned;
-    record.suspiciousCount = suspiciousCount;
+    record.suspiciousCount = m_findings.size();   // total flagged (all non-Clean)
+    record.criticalCount   = nCrit;
+    record.suspiciousOnly  = nSusp;
+    record.reviewCount     = nReview;
     record.elapsedSeconds  = elapsedSeconds;
     record.findings        = m_findings;   // snapshot (CVE fields may still be empty, ok)
     m_history.prepend(record);  // newest first; historyList is rebuilt on demand
@@ -1167,15 +1391,44 @@ void MainWindow::onHistoryClicked()
         historyList->addItem(placeholder);
     } else {
         for (const ScanRecord& r : m_history) {
-            QString label = QString("[%1]  %2 suspicious / %3 total  (%4)")
+            // Recompute per-category counts from findings if available
+            int crit = r.criticalCount, susp = r.suspiciousOnly, rev = r.reviewCount;
+            if (crit == 0 && susp == 0 && rev == 0 && !r.findings.isEmpty()) {
+                for (const SuspiciousFile& sf : r.findings) {
+                    QString cls = sf.classificationLevel.toUpper();
+                    if (cls == "CRITICAL")        ++crit;
+                    else if (cls == "SUSPICIOUS") ++susp;
+                    else                          ++rev;
+                }
+            }
+
+            // Build bucketed summary for history entry
+            QStringList cats;
+            if (crit > 0)  cats << QString("%1 crit").arg(crit);
+            if (susp > 0)  cats << QString("%1 susp").arg(susp);
+            if (rev > 0)   cats << QString("%1 review").arg(rev);
+            // Fallback for old DB records with no per-category data
+            QString buckets;
+            if (cats.isEmpty() && r.suspiciousCount > 0)
+                buckets = QString("%1 flagged").arg(r.suspiciousCount);
+            else if (cats.isEmpty())
+                buckets = "clean";
+            else
+                buckets = cats.join(", ");
+
+            QString label = QString("[%1]  %2 / %3 total  (%4)")
                 .arg(r.timestamp.toString("yyyy-MM-dd hh:mm:ss"))
-                .arg(r.suspiciousCount)
+                .arg(buckets)
                 .arg(r.totalScanned)
                 .arg(formatElapsed(r.elapsedSeconds));
             auto* item = new QListWidgetItem(label);
-            item->setForeground(QBrush(
-                r.suspiciousCount > 0 ? QColor("#B71C1C") : QColor("#2E7D32")
-            ));
+
+            QColor color = QColor("#2E7D32");  // green = clean
+            if (crit > 0)       color = QColor("#B71C1C");  // red
+            else if (susp > 0)  color = QColor("#E65100");  // orange
+            else if (rev > 0)   color = QColor("#F57F17");  // amber
+            else if (r.suspiciousCount > 0) color = QColor("#B71C1C");  // legacy fallback
+            item->setForeground(QBrush(color));
             historyList->addItem(item);
         }
     }
@@ -1202,12 +1455,34 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
         "Scan — " + record.timestamp.toString("yyyy-MM-dd hh:mm:ss")
     );
 
+    // Recompute per-category counts from findings if needed
+    int dCrit = record.criticalCount, dSusp = record.suspiciousOnly, dRev = record.reviewCount;
+    if (dCrit == 0 && dSusp == 0 && dRev == 0 && !record.findings.isEmpty()) {
+        for (const SuspiciousFile& sf : record.findings) {
+            QString cls = sf.classificationLevel.toUpper();
+            if (cls == "CRITICAL")        ++dCrit;
+            else if (cls == "SUSPICIOUS") ++dSusp;
+            else                          ++dRev;
+        }
+    }
+    QStringList buckets;
+    if (dCrit > 0)  buckets << QString("%1 critical").arg(dCrit);
+    if (dSusp > 0)  buckets << QString("%1 suspicious").arg(dSusp);
+    if (dRev > 0)   buckets << QString("%1 needs review").arg(dRev);
+    QString bucketStr;
+    if (buckets.isEmpty() && record.suspiciousCount > 0)
+        bucketStr = QString("%1 flagged").arg(record.suspiciousCount);
+    else if (buckets.isEmpty())
+        bucketStr = "None";
+    else
+        bucketStr = buckets.join(", ");
+
     histDetailSummaryLabel->setText(
         QString("Files scanned: %1\n"
-                "Suspicious files: %2\n"
+                "Findings: %2\n"
                 "Duration: %3")
             .arg(record.totalScanned)
-            .arg(record.suspiciousCount)
+            .arg(bucketStr)
             .arg(formatElapsed(record.elapsedSeconds))
     );
 
