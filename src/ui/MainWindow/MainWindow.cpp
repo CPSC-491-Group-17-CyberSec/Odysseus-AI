@@ -2,6 +2,8 @@
 #include "../../core/FileScanner.h"
 #include "../../db/ScanDatabase.h"
 #include "../ThreatCard/ThreatCard.h"
+#include "ai/LLMExplainer.h"
+#include "ai/FeatureExtractor.h"
 
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -38,6 +40,7 @@
 #include <QStorageInfo>
 #include <QDirIterator>
 #include <QResizeEvent>
+#include <QThread>
 
 // ============================================================================
 // Helpers
@@ -242,47 +245,125 @@ void MainWindow::setupUi()
     leftLayout->setSpacing(25);
     contentLayout->addWidget(leftContainer, 5);
 
-    // 1. STATS PANEL (unchanged)
+    // 1. AI DASHBOARD STATS PANEL
     auto* statsFrame = new QFrame();
-    statsFrame->setStyleSheet("QFrame { background-color: #E6F3F5; border-radius: 15px; color: #000000; }");
+    statsFrame->setStyleSheet(
+        "QFrame#aiDashboard { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,"
+        "  stop:0 #E8EAF6, stop:0.5 #E6F3F5, stop:1 #E8F5E9);"
+        "  border-radius: 15px; color: #000000; }"
+    );
+    statsFrame->setObjectName("aiDashboard");
     auto* statsLayout = new QHBoxLayout(statsFrame);
-    statsLayout->setContentsMargins(25, 25, 25, 25);
+    statsLayout->setContentsMargins(25, 20, 25, 20);
+    statsLayout->setSpacing(20);
 
-    auto* statsLeftLayout   = new QVBoxLayout();
-    auto* totalThreatsLabel = new QLabel("Total Active Threats");
-    totalThreatsLabel->setStyleSheet("font-size: 24px; font-weight: bold;");
-    auto* numberLabel = new QLabel("50");
-    numberLabel->setStyleSheet("font-size: 72px; font-weight: bold; margin-top: -10px; margin-bottom: -10px;");
-    auto* updatedLabel = new QLabel("Last updated 2 min ago <font color='#00DD00'>●</font>");
-    updatedLabel->setStyleSheet("font-size: 12px; color: #666;");
+    // ── Left: AI badge + total findings ──
+    auto* statsLeftLayout = new QVBoxLayout();
+    statsLeftLayout->setSpacing(4);
 
-    statsLeftLayout->addWidget(totalThreatsLabel);
-    statsLeftLayout->addWidget(numberLabel);
-    statsLeftLayout->addWidget(updatedLabel);
+    auto* aiBadgeRow = new QHBoxLayout();
+    auto* aiBadge = new QLabel("\xF0\x9F\xA7\xA0");   // brain emoji
+    aiBadge->setStyleSheet("font-size: 18px;");
+    auto* aiTitle = new QLabel("AI Threat Analysis");
+    aiTitle->setStyleSheet("font-size: 20px; font-weight: bold; color: #1A237E;");
+    aiBadgeRow->addWidget(aiBadge);
+    aiBadgeRow->addWidget(aiTitle);
+    aiBadgeRow->addStretch();
+    statsLeftLayout->addLayout(aiBadgeRow);
+
+    aiStatsModelLabel = new QLabel("Embedded AI: ONNX Anomaly Model v2  \xe2\x9c\x93 Active");
+    aiStatsModelLabel->setStyleSheet("font-size: 11px; color: #388E3C; font-style: italic;");
+    statsLeftLayout->addWidget(aiStatsModelLabel);
+
+    aiStatsLlmLabel = new QLabel("LLM Explanation: Ollama / Llama3  \xe2\x80\xa2  Checking...");
+    aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #888; font-style: italic;");
+    statsLeftLayout->addWidget(aiStatsLlmLabel);
+
+    aiStatsTotalLabel = new QLabel("0");
+    aiStatsTotalLabel->setStyleSheet(
+        "font-size: 54px; font-weight: bold; color: #1A237E;"
+        " margin-top: -4px; margin-bottom: -4px;"
+    );
+    statsLeftLayout->addWidget(aiStatsTotalLabel);
+
+    auto* totalCaption = new QLabel("files analyzed by AI");
+    totalCaption->setStyleSheet("font-size: 12px; color: #666;");
+    statsLeftLayout->addWidget(totalCaption);
     statsLeftLayout->addStretch(1);
 
-    auto* chartLayout = new QVBoxLayout();
-    auto* barsLayout  = new QHBoxLayout();
-    barsLayout->setSpacing(5);
-    barsLayout->setAlignment(Qt::AlignBottom | Qt::AlignRight);
+    // ── Centre: classification breakdown ──
+    auto* classLayout = new QVBoxLayout();
+    classLayout->setSpacing(6);
 
-    auto* bar1 = new QFrame(); bar1->setStyleSheet("background-color: #0000EE; border-radius: 0px;"); bar1->setFixedSize(30, 80);
-    auto* bar2 = new QFrame(); bar2->setStyleSheet("background-color: #0000EE; border-radius: 0px;"); bar2->setFixedSize(30, 50);
-    auto* bar3 = new QFrame(); bar3->setStyleSheet("background-color: #0000EE; border-radius: 0px;"); bar3->setFixedSize(30, 110);
-    barsLayout->addWidget(bar1);
-    barsLayout->addWidget(bar2);
-    barsLayout->addWidget(bar3);
+    auto* classTitle = new QLabel("Classification Breakdown");
+    classTitle->setStyleSheet("font-size: 13px; font-weight: bold; color: #333;");
+    classLayout->addWidget(classTitle);
 
-    auto* trendLabel = new QLabel("Threat Trend (24h)");
-    trendLabel->setStyleSheet("font-size: 14px; font-weight: bold; margin-top: 10px;");
-    trendLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    auto makeStat = [&](const QString& label, const QString& color, QLabel*& valueLabel) {
+        auto* row = new QHBoxLayout();
+        auto* dot = new QLabel(QString("<span style='color:%1; font-size:16px;'>\xe2\x97\x8f</span>").arg(color));
+        auto* lbl = new QLabel(label);
+        lbl->setStyleSheet("font-size: 12px; color: #444;");
+        valueLabel = new QLabel("0");
+        valueLabel->setStyleSheet(QString("font-size: 16px; font-weight: bold; color: %1;").arg(color));
+        valueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        row->addWidget(dot);
+        row->addWidget(lbl);
+        row->addStretch();
+        row->addWidget(valueLabel);
+        classLayout->addLayout(row);
+    };
 
-    chartLayout->addStretch(1);
-    chartLayout->addLayout(barsLayout);
-    chartLayout->addWidget(trendLabel);
+    makeStat("Critical",     "#C62828", aiStatsCritLabel);
+    makeStat("Suspicious",   "#E65100", aiStatsSuspLabel);
+    makeStat("Needs Review", "#F57F17", aiStatsReviewLabel);
+    makeStat("Clean",        "#2E7D32", aiStatsCleanLabel);
 
-    statsLayout->addLayout(statsLeftLayout);
-    statsLayout->addLayout(chartLayout);
+    classLayout->addStretch(1);
+
+    // ── Right: average score gauge ──
+    auto* scoreLayout = new QVBoxLayout();
+    scoreLayout->setSpacing(6);
+
+    auto* scoreTitle = new QLabel("Avg Anomaly Score");
+    scoreTitle->setStyleSheet("font-size: 13px; font-weight: bold; color: #333;");
+    scoreTitle->setAlignment(Qt::AlignCenter);
+    scoreLayout->addWidget(scoreTitle);
+
+    aiStatsAvgScoreLabel = new QLabel("—");
+    aiStatsAvgScoreLabel->setStyleSheet(
+        "font-size: 32px; font-weight: bold; color: #2E7D32;"
+    );
+    aiStatsAvgScoreLabel->setAlignment(Qt::AlignCenter);
+    scoreLayout->addWidget(aiStatsAvgScoreLabel);
+
+    // Score bar background
+    auto* scoreBarBg = new QFrame();
+    scoreBarBg->setFixedSize(140, 10);
+    scoreBarBg->setStyleSheet(
+        "QFrame { background-color: #D0D0D0; border-radius: 5px; }"
+    );
+    // Score bar fill (overlaid)
+    aiScoreFillBar = new QFrame(scoreBarBg);
+    aiScoreFillBar->setGeometry(0, 0, 0, 10);
+    aiScoreFillBar->setStyleSheet(
+        "QFrame { background-color: #2E7D32; border-radius: 5px; }"
+    );
+    auto* barCenter = new QHBoxLayout();
+    barCenter->addStretch();
+    barCenter->addWidget(scoreBarBg);
+    barCenter->addStretch();
+    scoreLayout->addLayout(barCenter);
+
+    auto* scoreCaption = new QLabel("0.0 = safe  •  1.0 = threat");
+    scoreCaption->setStyleSheet("font-size: 10px; color: #888;");
+    scoreCaption->setAlignment(Qt::AlignCenter);
+    scoreLayout->addWidget(scoreCaption);
+    scoreLayout->addStretch(1);
+
+    statsLayout->addLayout(statsLeftLayout, 3);
+    statsLayout->addLayout(classLayout, 3);
+    statsLayout->addLayout(scoreLayout, 2);
     leftLayout->addWidget(statsFrame);
 
     // 2. SEARCH & FILTER
@@ -298,7 +379,7 @@ void MainWindow::setupUi()
     );
 
     severityFilter = new QComboBox();
-    severityFilter->addItems({"All Severities", "Critical", "High", "Medium", "Low"});
+    severityFilter->addItems({"All Severities", "Critical", "Suspicious", "Needs Review", "High", "Medium", "Low"});
     severityFilter->setStyleSheet(
         "QComboBox { padding: 10px; border-radius: 8px; border: 1px solid #CCC;"
         " font-size: 14px; background-color: #FFFFFF; color: #000000; min-width: 150px; }"
@@ -315,9 +396,15 @@ void MainWindow::setupUi()
     auto* tableLayout = new QVBoxLayout(tableFrame);
     tableLayout->setContentsMargins(0, 0, 0, 0);
 
-    threatTable = new QTableWidget(0, 5);
-    threatTable->setHorizontalHeaderLabels({"Severity", "Name", "Vendor", "Published", "Status"});
+    threatTable = new QTableWidget(0, 7);
+    threatTable->setHorizontalHeaderLabels({
+        "Severity", "Name", "AI Classification", "Confidence",
+        "Vendor", "Published", "Status"
+    });
     threatTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    // Give the narrow columns less stretch
+    threatTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    threatTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
     threatTable->horizontalHeader()->setDefaultAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     threatTable->verticalHeader()->setVisible(false);
     threatTable->setFocusPolicy(Qt::NoFocus);
@@ -330,6 +417,7 @@ void MainWindow::setupUi()
         "QHeaderView::section { background-color: transparent; font-size: 15px; font-weight: bold;"
         " border: none; border-bottom: 1px solid #000; padding: 10px 5px; color: #000000; }"
         "QTableWidget::item { border-bottom: 1px solid #CCC; padding: 8px 5px; color: #000000; }"
+        "QTableWidget::item:selected { background-color: #E8EAF6; color: #1A237E; }"
     );
     tableLayout->addWidget(threatTable);
     leftLayout->addWidget(tableFrame, 1);
@@ -341,18 +429,22 @@ void MainWindow::setupUi()
     // RIGHT-SIDE PANELS  (all in same contentLayout slot, mutually exclusive)
     // =========================================================================
 
-    // ---- A. Threat-details panel (existing) ----
+    // ---- A. Threat-details panel (scrollable) ----
     detailsPanel = new QFrame();
     detailsPanel->setStyleSheet("QFrame { background-color: #F1F0EE; border-radius: 15px; color: #000000; }");
-    auto* detailsLayout = new QVBoxLayout(detailsPanel);
-    detailsLayout->setContentsMargins(25, 25, 25, 25);
-    detailsLayout->setSpacing(20);
+    auto* detailsOuterLayout = new QVBoxLayout(detailsPanel);
+    detailsOuterLayout->setContentsMargins(0, 0, 0, 0);
+    detailsOuterLayout->setSpacing(0);
 
-    auto* detailsHeaderLayout = new QHBoxLayout();
+    // Fixed header row (title + close button) – stays pinned at top
+    auto* detailsHeaderFrame = new QFrame();
+    detailsHeaderFrame->setStyleSheet("QFrame { background: transparent; }");
+    auto* detailsHeaderLayout = new QHBoxLayout(detailsHeaderFrame);
+    detailsHeaderLayout->setContentsMargins(25, 20, 25, 10);
     detailsTitleLabel = new QLabel("Threat Details");
     detailsTitleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #000000;");
 
-    auto* closeDetailsButton = new QPushButton("✕");
+    auto* closeDetailsButton = new QPushButton("\xe2\x9c\x95");
     closeDetailsButton->setFixedSize(30, 30);
     closeDetailsButton->setCursor(Qt::PointingHandCursor);
     closeDetailsButton->setStyleSheet(
@@ -362,23 +454,44 @@ void MainWindow::setupUi()
     detailsHeaderLayout->addWidget(detailsTitleLabel);
     detailsHeaderLayout->addStretch();
     detailsHeaderLayout->addWidget(closeDetailsButton);
-    detailsLayout->addLayout(detailsHeaderLayout);
+    detailsOuterLayout->addWidget(detailsHeaderFrame);
+
+    // Scrollable content area – long findings scroll instead of clipping
+    auto* detailsScroll = new QScrollArea();
+    detailsScroll->setWidgetResizable(true);
+    detailsScroll->setFrameShape(QFrame::NoFrame);
+    detailsScroll->setStyleSheet(
+        "QScrollArea { background: transparent; }"
+        "QScrollBar:vertical { width: 6px; background: transparent; }"
+        "QScrollBar::handle:vertical { background: #BBB; border-radius: 3px; min-height: 30px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    );
+    auto* detailsScrollContent = new QWidget();
+    auto* detailsLayout = new QVBoxLayout(detailsScrollContent);
+    detailsLayout->setContentsMargins(25, 5, 25, 25);
+    detailsLayout->setSpacing(12);
 
     detailsDescLabel = new QLabel();
     detailsDescLabel->setWordWrap(true);
     detailsDescLabel->setStyleSheet("font-size: 14px; color: #333;");
+    detailsDescLabel->setTextFormat(Qt::RichText);
     detailsLayout->addWidget(detailsDescLabel);
 
     detailsAILabel = new QLabel();
     detailsAILabel->setWordWrap(true);
     detailsAILabel->setStyleSheet("font-size: 14px; color: #333;");
+    detailsAILabel->setTextFormat(Qt::RichText);
     detailsLayout->addWidget(detailsAILabel);
 
     detailsMitreLabel = new QLabel();
     detailsMitreLabel->setWordWrap(true);
     detailsMitreLabel->setStyleSheet("font-size: 14px; color: #333; margin-top: 10px;");
+    detailsMitreLabel->setTextFormat(Qt::RichText);
     detailsLayout->addWidget(detailsMitreLabel);
     detailsLayout->addStretch(1);
+
+    detailsScroll->setWidget(detailsScrollContent);
+    detailsOuterLayout->addWidget(detailsScroll, 1);
 
     contentLayout->addWidget(detailsPanel, 3);
     detailsPanel->setVisible(false);
@@ -599,7 +712,8 @@ void MainWindow::addThreatEntry(const QString& severity, const QString& name,
     threatTable->setSortingEnabled(false);
     int row = threatTable->rowCount();
     threatTable->insertRow(row);
-    QStringList cols = {severity, name, vendor, date, status};
+    // 7 columns: Severity, Name, AI Classification, Confidence, Vendor, Published, Status
+    QStringList cols = {severity, name, "—", "—", vendor, date, status};
     for (int i = 0; i < cols.size(); ++i) {
         auto* item = new QTableWidgetItem(cols[i]);
         item->setForeground(QBrush(Qt::black));
@@ -695,16 +809,42 @@ void MainWindow::addScanFindingToTable(const SuspiciousFile& sf)
     // Name column: CVE ID if we have one, otherwise filename
     QString nameText = sf.cveId.isEmpty() ? sf.fileName : sf.cveId;
 
+    // ── AI Classification column ──
+    QString aiClassText = "—";
+    QColor  aiClassColor = Qt::black;
+    if (!sf.classificationLevel.isEmpty()) {
+        QString cls = sf.classificationLevel.toUpper();
+        if (cls == "CRITICAL")       { aiClassText = "CRITICAL";     aiClassColor = QColor("#C62828"); }
+        else if (cls == "SUSPICIOUS"){ aiClassText = "Suspicious";   aiClassColor = QColor("#E65100"); }
+        else if (cls == "ANOMALOUS") { aiClassText = "Anomalous";    aiClassColor = QColor("#F57F17"); }
+        else if (cls == "CLEAN")     { aiClassText = "Clean";        aiClassColor = QColor("#2E7D32"); }
+        else                          { aiClassText = sf.classificationLevel; }
+    }
+
+    // ── Confidence (anomaly score) column ──
+    QString confText = "—";
+    QColor  confColor = Qt::black;
+    if (sf.anomalyScore > 0.0f) {
+        confText = QString::number(double(sf.anomalyScore), 'f', 3);
+        if (sf.anomalyScore >= 0.8f)      confColor = QColor("#C62828");
+        else if (sf.anomalyScore >= 0.6f) confColor = QColor("#E65100");
+        else if (sf.anomalyScore >= 0.4f) confColor = QColor("#F57F17");
+        else                               confColor = QColor("#2E7D32");
+    }
+
     // Vendor: derive from category tag
     QString vendorText = sf.cveSummary.isEmpty() ? sf.category : "NVD";
 
     QString dateText = sf.lastModified.toString("M/dd/yyyy");
 
-    QStringList cols = {sevText, nameText, vendorText, dateText, "Detected"};
+    // 7 columns: Severity, Name, AI Classification, Confidence, Vendor, Published, Status
+    QStringList cols = {sevText, nameText, aiClassText, confText, vendorText, dateText, "Detected"};
+    QList<QColor> colColors = {sevColor, Qt::black, aiClassColor, confColor,
+                               Qt::black, Qt::black, Qt::black};
     for (int i = 0; i < cols.size(); ++i) {
         auto* item = new QTableWidgetItem(cols[i]);
-        item->setForeground(QBrush(i == 0 ? sevColor : Qt::black));
-        if (i == 0) item->setFont(QFont("", -1, QFont::Bold));
+        item->setForeground(QBrush(colColors[i]));
+        if (i == 0 || i == 2) item->setFont(QFont("", -1, QFont::Bold));
         // Store full path in UserRole for the detail popup
         item->setData(Qt::UserRole,     sf.filePath);
         item->setData(Qt::UserRole + 1, sf.reason);
@@ -832,8 +972,11 @@ void MainWindow::onFilterOrSearchChanged()
 
 void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
 {
+    // ── Highlight the selected row ──
+    threatTable->selectRow(row);
+
     QString threatName = threatTable->item(row, 1)->text();
-    QString vendor     = threatTable->item(row, 2)->text();
+    QString vendor     = threatTable->item(row, 4)->text();   // col 4 after AI columns
 
     // Check if this row has scan-finding data (UserRole set)
     QString filePath   = threatTable->item(row, 0)->data(Qt::UserRole).toString();
@@ -855,67 +998,196 @@ void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
 
         if (findingIdx >= 0 && (!m_findings[findingIdx].classificationLevel.isEmpty() ||
                                   !m_findings[findingIdx].severityLevel.isEmpty())) {
-            // AI Anomaly Detection finding – show structured details
+            // ════════════════════════════════════════════════════════════
+            //  AI Anomaly Detection finding – rich detail panel
+            // ════════════════════════════════════════════════════════════
+            m_detailFindingIdx = findingIdx;   // track which finding is shown
             const SuspiciousFile& sf = m_findings[findingIdx];
 
-            // Use classification level (Phase 2) if available, fall back to severity
+            // Resolve display level + colour
             QString displayLevel = !sf.classificationLevel.isEmpty()
                                        ? sf.classificationLevel
                                        : sf.severityLevel;
-            QString levelColor;
+            QString levelColor, levelBg;
             QString levelUpper = displayLevel.toUpper();
-            if (levelUpper == "CRITICAL")       levelColor = "#C62828";
-            else if (levelUpper == "SUSPICIOUS") levelColor = "#E65100";
-            else if (levelUpper == "HIGH")       levelColor = "#E65100";
-            else if (levelUpper == "ANOMALOUS")  levelColor = "#F57F17";
-            else if (levelUpper == "MEDIUM")     levelColor = "#F57F17";
-            else                                 levelColor = "#2E7D32";
+            if (levelUpper == "CRITICAL")       { levelColor = "#C62828"; levelBg = "#FDECEA"; }
+            else if (levelUpper == "SUSPICIOUS") { levelColor = "#E65100"; levelBg = "#FFF3E0"; }
+            else if (levelUpper == "HIGH")       { levelColor = "#E65100"; levelBg = "#FFF3E0"; }
+            else if (levelUpper == "ANOMALOUS")  { levelColor = "#F57F17"; levelBg = "#FFFDE7"; }
+            else if (levelUpper == "MEDIUM")     { levelColor = "#F57F17"; levelBg = "#FFFDE7"; }
+            else                                 { levelColor = "#2E7D32"; levelBg = "#E8F5E9"; }
+
+            // ── File info + score hero section ──
+            // Truncate very long paths to keep the layout clean
+            QString displayPath = filePath;
+            if (displayPath.length() > 120)
+                displayPath = "\xe2\x80\xa6" + displayPath.right(115);
+
+            int barPct = qBound(0, int(sf.anomalyScore * 100), 100);
+            QString barColor = (barPct >= 80) ? "#C62828" : (barPct >= 60) ? "#E65100"
+                             : (barPct >= 40) ? "#F57F17" : "#2E7D32";
 
             QString descHtml;
-            descHtml += "<b>File Path:</b><br>" + filePath + "<br><br>";
-            descHtml += QString("<b>Anomaly Score:</b> %1 / 1.000<br>")
-                            .arg(double(sf.anomalyScore), 0, 'f', 3);
-            descHtml += QString("<b>Threshold:</b> %1<br>")
-                            .arg(double(sf.anomalyThreshold), 0, 'f', 3);
-            descHtml += QString("<b>Classification:</b> <span style='color:%1; font-weight:bold;'>%2</span>")
-                            .arg(levelColor)
-                            .arg(displayLevel);
+            // Score hero – large badge + progress bar at the top for instant readability
+            descHtml += "<div style='background-color:#FAFAFA; border-radius:10px; padding:14px;"
+                        " margin:0 0 8px 0; border:1px solid #E0E0E0;'>";
+            descHtml += QString("<div style='display:flex; align-items:center;'>"
+                        "<span style='background-color:%1; color:%2; padding:4px 12px;"
+                        " border-radius:6px; font-weight:bold; font-size:14px;'>%3</span>"
+                        "&nbsp;&nbsp;"
+                        "<span style='font-size:24px; font-weight:bold; color:%4;'>%5</span>"
+                        "<span style='font-size:14px; color:#888;'> / 1.000</span>"
+                        "</div>")
+                          .arg(levelBg, levelColor, displayLevel,
+                               barColor, QString::number(double(sf.anomalyScore), 'f', 3));
+            // Score bar
+            descHtml += QString("<div style='background-color:#E0E0E0; border-radius:5px;"
+                        " height:10px; width:100%%; margin:8px 0 6px 0;'>"
+                        "<div style='background-color:%1; border-radius:5px;"
+                        " height:10px; width:%2%%;'></div></div>")
+                          .arg(barColor).arg(barPct);
+            descHtml += QString("<span style='font-size:11px; color:#888;'>"
+                        "Severity: <b>%1</b> &nbsp;|&nbsp; Threshold: %2</span>")
+                          .arg(!sf.severityLevel.isEmpty() ? sf.severityLevel : "N/A")
+                          .arg(double(sf.anomalyThreshold), 0, 'f', 3);
+            descHtml += "</div>";
+
+            // File metadata
+            descHtml += "<span style='font-size:11px; color:#777; word-wrap:break-word;'>"
+                        + displayPath + "</span><br>";
+            descHtml += "<span style='font-size:12px; color:#555;'>"
+                        + QString::number(sf.sizeBytes) + " bytes &nbsp;|&nbsp; "
+                        + sf.lastModified.toString("yyyy-MM-dd hh:mm:ss") + "</span>";
             detailsDescLabel->setText(descHtml);
 
-            // AI section: summary + indicators
+            // ════════════════════════════════════════════════════════════
+            //  "Why flagged?" – concise top-3 summary for demo clarity
+            // ════════════════════════════════════════════════════════════
             QString aiHtml;
-            if (!sf.aiSummary.isEmpty()) {
-                aiHtml += "<b>AI Summary:</b><br>" + sf.aiSummary + "<br><br>";
-            }
             if (!sf.keyIndicators.isEmpty()) {
-                aiHtml += "<b>Key Indicators:</b><br>";
+                aiHtml += "<div style='background-color:#FFF3E0; border-radius:8px; padding:10px 14px;"
+                          " margin:0 0 8px 0; border-left:4px solid #FF9800;'>";
+                aiHtml += "<span style='font-size:13px; font-weight:bold; color:#E65100;'>"
+                          "\xe2\x9a\xa0 Why was this flagged?</span><br>";
+                int count = 0;
                 for (const QString& ind : sf.keyIndicators) {
-                    aiHtml += QString::fromUtf8("\u2022 ") + ind + "<br>";
+                    if (count >= 3) break;
+                    aiHtml += "<span style='font-size:12px; color:#444;'>\xe2\x80\xa2 "
+                              + ind + "</span><br>";
+                    ++count;
+                }
+                aiHtml += "</div>";
+            }
+
+            // ════════════════════════════════════════════════════════════
+            //  Embedded AI Analysis section (ONNX model output)
+            // ════════════════════════════════════════════════════════════
+            aiHtml += "<div style='background-color:#EDE7F6; border-radius:10px; padding:14px;"
+                      " margin:0 0 4px 0; border-left:4px solid #5C6BC0;'>";
+            aiHtml += "<span style='font-size:14px; font-weight:bold; color:#1A237E;'>"
+                      "\xF0\x9F\xA7\xA0 Embedded AI Analysis</span>"
+                      "<span style='font-size:10px; color:#888; margin-left:6px;'>"
+                      "ONNX Anomaly Model</span><br><br>";
+
+            // Embedded AI Summary
+            if (!sf.aiSummary.isEmpty()) {
+                aiHtml += "<span style='font-size:12px; color:#333; line-height:1.5;'>"
+                          + sf.aiSummary + "</span><br>";
+            } else {
+                aiHtml += "<span style='font-size:12px; color:#999; font-style:italic;'>"
+                          "No embedded AI summary available for this file.</span><br>";
+            }
+
+            // Full indicator list (if more than the top-3 shown above)
+            if (sf.keyIndicators.size() > 3) {
+                aiHtml += "<br><span style='font-size:11px; font-weight:bold; color:#555;'>"
+                          "All indicators:</span><br>";
+                for (const QString& ind : sf.keyIndicators) {
+                    aiHtml += "<span style='font-size:11px; color:#555;'>\xe2\x96\xb8 "
+                              + ind + "</span><br>";
                 }
             }
-            if (!cveId.isEmpty()) {
-                aiHtml += "<br><b>CVE:</b> " + cveId;
-                if (!cveSummary.isEmpty())
-                    aiHtml += "<br><b>NVD:</b> " + cveSummary;
+
+            aiHtml += "<br><span style='font-size:10px; color:#388E3C; font-weight:bold;'>"
+                      "\xe2\x9c\x93 Embedded AI: Active</span>";
+            aiHtml += "</div>";
+
+            // ════════════════════════════════════════════════════════════
+            //  LLM Explanation (Ollama / Llama3) — visually subordinate
+            //  Trigger on-demand request BEFORE rendering so m_llmPendingIndex
+            //  is set and the loading state shows on the first paint.
+            // ════════════════════════════════════════════════════════════
+            if (sf.aiExplanation.isEmpty())
+                requestLlmExplanation(findingIdx);
+
+            aiHtml += "<div style='background-color:#F5F9FF; border-radius:8px; padding:12px;"
+                      " margin:4px 0; border-left:3px solid #90CAF9;'>";
+            aiHtml += "<span style='font-size:13px; font-weight:bold; color:#0D47A1;'>"
+                      "\xF0\x9F\x92\xAC LLM Explanation</span>"
+                      "<span style='font-size:10px; color:#888; margin-left:6px;'>"
+                      "Ollama / Llama3</span><br>";
+
+            if (!sf.aiExplanation.isEmpty()) {
+                // Show LLM text in a readable block with good line height
+                aiHtml += "<br><span style='font-size:12px; color:#333; line-height:1.5;'>"
+                          + sf.aiExplanation + "</span><br>";
+                aiHtml += "<br><span style='font-size:10px; color:#1565C0; font-weight:bold;'>"
+                          "\xe2\x9c\x93 LLM: Active</span>";
+            } else if (m_llmPendingIndex == findingIdx) {
+                // LLM request is in flight for this finding — show loading state
+                aiHtml += "<br><span style='font-size:12px; color:#1565C0; font-style:italic;'>"
+                          "\xe2\x8f\xb3 Generating LLM explanation...</span><br>";
+                aiHtml += "<br><span style='font-size:10px; color:#90CAF9;'>"
+                          "LLM: Processing</span>";
+            } else {
+                // No explanation yet and not currently loading
+                aiHtml += "<br><span style='font-size:12px; color:#999; font-style:italic;'>"
+                          "The LLM explanation service is not currently running. "
+                          "The embedded AI analysis above provides the full assessment.</span><br>";
+                aiHtml += "<br><span style='font-size:10px; color:#B0B0B0;'>"
+                          "\xe2\x9c\x97 LLM: Unavailable</span>";
             }
+
+            aiHtml += "</div>";
             detailsAILabel->setText(aiHtml);
 
-            // Actions section
+            // ── Recommended Actions + metadata ──
             QString actHtml;
             if (!sf.recommendedActions.isEmpty()) {
-                actHtml += "<b>Recommended Actions:</b><br>";
+                actHtml += "<div style='background-color:#FFF8E1; border-radius:8px; padding:10px;"
+                           " margin:4px 0; border-left:4px solid #F57F17;'>";
+                actHtml += "<b style='font-size:13px;'>Recommended Actions</b>"
+                           "<span style='font-size:10px; color:#888;'> (Embedded AI)</span><br>";
                 for (int i = 0; i < sf.recommendedActions.size(); ++i) {
-                    actHtml += QString("%1. %2<br>").arg(i + 1).arg(sf.recommendedActions[i]);
+                    actHtml += QString("<span style='font-size:12px; color:#444;'>%1. %2</span><br>")
+                                   .arg(i + 1).arg(sf.recommendedActions[i]);
                 }
+                actHtml += "</div><br>";
             }
-            actHtml += "<br><b>Engine:</b> " + vendor + "<br>"
-                       "<b>Source:</b> <span style='background-color:#E6F3F5; padding:3px 6px;"
-                       " border-radius:4px;'>Odysseus AI Scanner</span>";
+
+            // CVE info if available
+            if (!cveId.isEmpty()) {
+                actHtml += "<b>CVE:</b> " + cveId;
+                if (!cveSummary.isEmpty())
+                    actHtml += "<br><b>NVD:</b> " + cveSummary;
+                actHtml += "<br><br>";
+            }
+
+            actHtml += "<span style='font-size:12px;'>"
+                       "<b>Detection Engine:</b> " + vendor + "<br>"
+                       "<b>Source:</b> <span style='background-color:#E8EAF6; padding:3px 8px;"
+                       " border-radius:4px; color:#1A237E; font-weight:bold;'>"
+                       "\xF0\x9F\xA7\xA0 Odysseus AI Scanner</span></span>";
             detailsMitreLabel->setText(actHtml);
         } else {
             // Non-AI scan finding (hash-based or other)
+            QString displayPath2 = filePath;
+            if (displayPath2.length() > 120)
+                displayPath2 = "\xe2\x80\xa6" + displayPath2.right(115);
             detailsDescLabel->setText(
-                "<b>File Path:</b><br>" + filePath + "<br><br>"
+                "<b>File Path:</b><br>"
+                "<span style='font-size:11px; color:#777; word-wrap:break-word;'>"
+                + displayPath2 + "</span><br><br>"
                 "<b>Detection Reason:</b><br>" + reason
             );
             detailsAILabel->setText(
@@ -952,6 +1224,7 @@ void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
 
 void MainWindow::onCloseDetailsClicked()
 {
+    m_detailFindingIdx = -1;
     showPanel(ActivePanel::None);
 }
 
@@ -1059,6 +1332,19 @@ void MainWindow::startScanForPath(const QString& rootPath)
     scanStorageLabel->setText("Storage: —");
     scanPathLabel->clear();
     scanProgressBar->setValue(0);
+
+    // Reset AI dashboard for new scan
+    aiStatsTotalLabel->setText("0");
+    aiStatsCritLabel->setText("0");
+    aiStatsSuspLabel->setText("0");
+    aiStatsReviewLabel->setText("0");
+    aiStatsCleanLabel->setText("0");
+    aiStatsAvgScoreLabel->setText("—");
+    aiStatsAvgScoreLabel->setStyleSheet("font-size: 32px; font-weight: bold; color: #2E7D32;");
+    aiScoreFillBar->setFixedWidth(0);
+    aiStatsModelLabel->setText("Embedded AI: ONNX Anomaly Model v2  \xe2\x9c\x93 Scanning...");
+    aiStatsModelLabel->setStyleSheet("font-size: 11px; color: #388E3C; font-style: italic;");
+    aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x80\xa2  Waiting for findings...");
 
     showPanel(ActivePanel::ScanResults);
 
@@ -1235,6 +1521,58 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
     scanSummaryLabel->setText(
         QString("Findings so far: %1").arg(tally)
     );
+
+    // ── Update AI dashboard stats live ──
+    aiStatsTotalLabel->setText(QString::number(m_findings.size()));
+    aiStatsCritLabel->setText(QString::number(nCrit));
+    aiStatsSuspLabel->setText(QString::number(nSusp));
+    aiStatsReviewLabel->setText(QString::number(nReview));
+
+    // Compute average anomaly score across all flagged files
+    float scoreSum = 0.0f;
+    int   scoreN   = 0;
+    for (const SuspiciousFile& f : m_findings) {
+        if (f.anomalyScore > 0.0f) {
+            scoreSum += f.anomalyScore;
+            ++scoreN;
+        }
+    }
+    if (scoreN > 0) {
+        float avg = scoreSum / float(scoreN);
+        aiStatsAvgScoreLabel->setText(QString::number(double(avg), 'f', 3));
+        // Color-code average
+        QString avgColor = (avg >= 0.8f) ? "#C62828" : (avg >= 0.6f) ? "#E65100"
+                         : (avg >= 0.4f) ? "#F57F17" : "#2E7D32";
+        aiStatsAvgScoreLabel->setStyleSheet(
+            QString("font-size: 32px; font-weight: bold; color: %1;").arg(avgColor));
+        // Update score fill bar
+        int fillW = qBound(0, int(avg * 140), 140);
+        aiScoreFillBar->setFixedWidth(fillW);
+        aiScoreFillBar->setStyleSheet(
+            QString("QFrame { background-color: %1; border-radius: 5px; }").arg(avgColor));
+    }
+
+    aiStatsModelLabel->setText(
+        QString("Embedded AI: ONNX Anomaly Model v2  \xe2\x9c\x93 Analyzing (%1 flagged)")
+            .arg(m_findings.size())
+    );
+    aiStatsModelLabel->setStyleSheet("font-size: 11px; color: #388E3C; font-style: italic;");
+
+    // Update LLM status based on whether any finding got an LLM explanation
+    bool anyLlm = false;
+    for (const SuspiciousFile& f2 : m_findings) {
+        if (!f2.aiExplanation.isEmpty()) { anyLlm = true; break; }
+    }
+    if (anyLlm) {
+        aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x9c\x93 Active");
+        aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #1565C0; font-style: italic;");
+    } else if (file.llmAvailable) {
+        aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x80\xa2  Connected (no output yet)");
+        aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #888; font-style: italic;");
+    } else {
+        aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x9c\x97 Unavailable");
+        aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #E65100; font-style: italic;");
+    }
 }
 
 void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned)
@@ -1274,16 +1612,17 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
 
     if (m_findings.isEmpty()) {
         qDebug() << "Nothing to do";
-        scanStatusLabel->setText("Scan complete — nothing suspicious found.");
-        scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #2E7D32;");
+        scanStatusLabel->setText("\xE2\x9C\x85 Scan complete — your system looks clean.");
+        scanStatusLabel->setStyleSheet("font-size: 14px; font-weight: bold; color: #2E7D32;");
 
         auto* item = new QListWidgetItem(
-            "Nothing to do — no suspicious files detected.", scanResultsList
+            "\xF0\x9F\x9B\xA1 No suspicious files detected. All scanned files passed AI analysis.",
+            scanResultsList
         );
         item->setForeground(QBrush(QColor("#2E7D32")));
 
         scanSummaryLabel->setText(
-            QString("Scanned %1 file(s) — all clear.").arg(totalScanned)
+            QString("Scanned %1 file(s) with embedded AI — all clear.").arg(totalScanned)
         );
     } else {
         qDebug() << "=== Scan Complete ===";
@@ -1327,6 +1666,62 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
             scanSummaryLabel->setText(
                 QString("%1 file(s) flagged for review — no CVE lookup needed.").arg(nReview)
             );
+        }
+    }
+
+    // ── Final AI dashboard update ──
+    aiStatsTotalLabel->setText(QString::number(totalScanned));
+    aiStatsCritLabel->setText(QString::number(nCrit));
+    aiStatsSuspLabel->setText(QString::number(nSusp));
+    aiStatsReviewLabel->setText(QString::number(nReview));
+    aiStatsCleanLabel->setText(QString::number(totalScanned - m_findings.size()));
+
+    // Final average anomaly score
+    {
+        float scoreSum = 0.0f;
+        int   scoreN   = 0;
+        for (const SuspiciousFile& sf2 : m_findings) {
+            if (sf2.anomalyScore > 0.0f) {
+                scoreSum += sf2.anomalyScore;
+                ++scoreN;
+            }
+        }
+        if (scoreN > 0) {
+            float avg = scoreSum / float(scoreN);
+            aiStatsAvgScoreLabel->setText(QString::number(double(avg), 'f', 3));
+            QString avgColor = (avg >= 0.8f) ? "#C62828" : (avg >= 0.6f) ? "#E65100"
+                             : (avg >= 0.4f) ? "#F57F17" : "#2E7D32";
+            aiStatsAvgScoreLabel->setStyleSheet(
+                QString("font-size: 32px; font-weight: bold; color: %1;").arg(avgColor));
+            int fillW = qBound(0, int(avg * 140), 140);
+            aiScoreFillBar->setFixedWidth(fillW);
+            aiScoreFillBar->setStyleSheet(
+                QString("QFrame { background-color: %1; border-radius: 5px; }").arg(avgColor));
+        } else {
+            aiStatsAvgScoreLabel->setText("0.000");
+            aiStatsAvgScoreLabel->setStyleSheet("font-size: 32px; font-weight: bold; color: #2E7D32;");
+            aiScoreFillBar->setFixedWidth(0);
+        }
+    }
+
+    aiStatsModelLabel->setText(
+        QString("Embedded AI: ONNX Anomaly Model v2  \xe2\x9c\x93 Scan complete (%1s)")
+            .arg(elapsedSeconds)
+    );
+    aiStatsModelLabel->setStyleSheet("font-size: 11px; color: #388E3C; font-style: italic;");
+
+    // Final LLM status
+    {
+        bool anyLlm = false;
+        for (const SuspiciousFile& sf3 : m_findings) {
+            if (!sf3.aiExplanation.isEmpty()) { anyLlm = true; break; }
+        }
+        if (anyLlm) {
+            aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x9c\x93 Active");
+            aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #1565C0; font-style: italic;");
+        } else {
+            aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x9c\x97 Unavailable");
+            aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #E65100; font-style: italic;");
         }
     }
 
@@ -1523,6 +1918,221 @@ void MainWindow::showHistoryDetail(const ScanRecord& record)
 
     showPanel(ActivePanel::HistoryDetail);
 }
+// ============================================================================
+// ON-DEMAND LLM EXPLANATION
+// ============================================================================
+
+void MainWindow::requestLlmExplanation(int findingIndex)
+{
+    if (findingIndex < 0 || findingIndex >= m_findings.size())
+        return;
+
+    // Already have an explanation cached — nothing to do.
+    if (!m_findings[findingIndex].aiExplanation.isEmpty())
+        return;
+
+    // Another request is already in flight — don't pile up.
+    if (m_llmPendingIndex >= 0)
+        return;
+
+    // Lazy-init: create the LLMExplainer once and probe Ollama availability.
+    if (!m_llmChecked) {
+        m_llmChecked = true;
+        m_llmExplainer = new LLMExplainer();
+        m_llmReachable = m_llmExplainer->isAvailable();
+        if (m_llmReachable) {
+            qDebug() << "[LLM] Ollama is reachable — on-demand explanations enabled.";
+        } else {
+            qDebug() << "[LLM] Ollama not reachable — on-demand explanations disabled.";
+            delete m_llmExplainer;
+            m_llmExplainer = nullptr;
+        }
+    }
+
+    if (!m_llmReachable || !m_llmExplainer)
+        return;
+
+    m_llmPendingIndex = findingIndex;
+
+    // Capture what we need for the background callback.
+    const SuspiciousFile& sf = m_findings[findingIndex];
+    QString filePath            = sf.filePath;
+    QString classificationLevel = sf.classificationLevel;
+    float   anomalyScore        = sf.anomalyScore;
+    int     idx                 = findingIndex;
+
+    // Extract features on the main thread (fast ~ms I/O for small files).
+    std::vector<float> features = extractFeatures(filePath.toStdString());
+
+    // Fire the async LLM request — explainAsync spawns a detached std::thread
+    // internally; the callback runs on that background thread, so we use
+    // QMetaObject::invokeMethod to deliver the result to the UI thread.
+    m_llmExplainer->explainAsync(
+        filePath.toStdString(),
+        features,
+        anomalyScore,
+        [this, idx](const std::string& response, bool success) {
+            QString explanation = success ? QString::fromStdString(response) : QString();
+            QMetaObject::invokeMethod(this, [this, idx, explanation, success]() {
+                onLlmExplanationReady(idx, explanation, success);
+            }, Qt::QueuedConnection);
+        },
+        classificationLevel.toStdString()
+    );
+}
+
+void MainWindow::onLlmExplanationReady(int findingIndex, const QString& explanation, bool success)
+{
+    m_llmPendingIndex = -1;
+
+    if (findingIndex < 0 || findingIndex >= m_findings.size())
+        return;
+
+    if (success && !explanation.isEmpty()) {
+        // Cache the explanation in the in-memory finding.
+        m_findings[findingIndex].aiExplanation = explanation;
+        m_findings[findingIndex].llmAvailable  = true;
+
+        qDebug() << "[LLM] Explanation received for finding" << findingIndex
+                 << "(" << m_findings[findingIndex].fileName << ")";
+
+        // Persist to DB cache so it survives app restart.
+        if (m_db) {
+            CacheEntry ce;
+            const SuspiciousFile& sf = m_findings[findingIndex];
+            ce.filePath            = sf.filePath;
+            ce.lastModified        = sf.lastModified.toString(Qt::ISODate);
+            ce.fileSize            = sf.sizeBytes;
+            ce.isFlagged           = true;
+            ce.reason              = sf.reason;
+            ce.category            = sf.category;
+            ce.classificationLevel = sf.classificationLevel;
+            ce.severityLevel       = sf.severityLevel;
+            ce.anomalyScore        = sf.anomalyScore;
+            ce.aiSummary           = sf.aiSummary;
+            ce.keyIndicators       = sf.keyIndicators;
+            ce.recommendedActions  = sf.recommendedActions;
+            ce.aiExplanation       = sf.aiExplanation;
+            ce.llmAvailable        = true;
+            m_db->flushScanCache({ce});
+        }
+    } else {
+        qDebug() << "[LLM] Explanation failed for finding" << findingIndex;
+    }
+
+    // Update the detail panel if this finding is still being viewed.
+    if (m_detailFindingIdx == findingIndex) {
+        refreshDetailLlmSection(m_findings[findingIndex]);
+    }
+
+    // Update dashboard LLM status.
+    bool anyLlm = false;
+    for (const SuspiciousFile& f : m_findings) {
+        if (!f.aiExplanation.isEmpty()) { anyLlm = true; break; }
+    }
+    if (anyLlm) {
+        aiStatsLlmLabel->setText("LLM Explanation: Ollama / Llama3  \xe2\x9c\x93 Active");
+        aiStatsLlmLabel->setStyleSheet("font-size: 11px; color: #1565C0; font-style: italic;");
+    }
+}
+
+void MainWindow::refreshDetailLlmSection(const SuspiciousFile& sf)
+{
+    // Rebuild just the LLM portion of the AI label.
+    // We need to regenerate the full aiHtml since QLabel doesn't support partial updates.
+    // Read current text, find the LLM div, and replace it.
+    // Simpler approach: re-render the entire detailsAILabel content.
+
+    // First, reconstruct the "Why flagged?" + Embedded AI + LLM sections.
+    QString levelColor, levelBg;
+    QString displayLevel = !sf.classificationLevel.isEmpty()
+                               ? sf.classificationLevel : sf.severityLevel;
+    QString levelUpper = displayLevel.toUpper();
+    if (levelUpper == "CRITICAL")       { levelColor = "#C62828"; levelBg = "#FDECEA"; }
+    else if (levelUpper == "SUSPICIOUS") { levelColor = "#E65100"; levelBg = "#FFF3E0"; }
+    else if (levelUpper == "HIGH")       { levelColor = "#E65100"; levelBg = "#FFF3E0"; }
+    else if (levelUpper == "ANOMALOUS")  { levelColor = "#F57F17"; levelBg = "#FFFDE7"; }
+    else if (levelUpper == "MEDIUM")     { levelColor = "#F57F17"; levelBg = "#FFFDE7"; }
+    else                                 { levelColor = "#2E7D32"; levelBg = "#E8F5E9"; }
+
+    QString aiHtml;
+
+    // "Why flagged?"
+    if (!sf.keyIndicators.isEmpty()) {
+        aiHtml += "<div style='background-color:#FFF3E0; border-radius:8px; padding:10px 14px;"
+                  " margin:0 0 8px 0; border-left:4px solid #FF9800;'>";
+        aiHtml += "<span style='font-size:13px; font-weight:bold; color:#E65100;'>"
+                  "\xe2\x9a\xa0 Why was this flagged?</span><br>";
+        int count = 0;
+        for (const QString& ind : sf.keyIndicators) {
+            if (count >= 3) break;
+            aiHtml += "<span style='font-size:12px; color:#444;'>\xe2\x80\xa2 "
+                      + ind + "</span><br>";
+            ++count;
+        }
+        aiHtml += "</div>";
+    }
+
+    // Embedded AI section
+    aiHtml += "<div style='background-color:#EDE7F6; border-radius:10px; padding:14px;"
+              " margin:0 0 4px 0; border-left:4px solid #5C6BC0;'>";
+    aiHtml += "<span style='font-size:14px; font-weight:bold; color:#1A237E;'>"
+              "\xF0\x9F\xA7\xA0 Embedded AI Analysis</span>"
+              "<span style='font-size:10px; color:#888; margin-left:6px;'>"
+              "ONNX Anomaly Model</span><br><br>";
+
+    if (!sf.aiSummary.isEmpty()) {
+        aiHtml += "<span style='font-size:12px; color:#333; line-height:1.5;'>"
+                  + sf.aiSummary + "</span><br>";
+    } else {
+        aiHtml += "<span style='font-size:12px; color:#999; font-style:italic;'>"
+                  "No embedded AI summary available for this file.</span><br>";
+    }
+
+    if (sf.keyIndicators.size() > 3) {
+        aiHtml += "<br><span style='font-size:11px; font-weight:bold; color:#555;'>"
+                  "All indicators:</span><br>";
+        for (const QString& ind : sf.keyIndicators) {
+            aiHtml += "<span style='font-size:11px; color:#555;'>\xe2\x96\xb8 "
+                      + ind + "</span><br>";
+        }
+    }
+
+    aiHtml += "<br><span style='font-size:10px; color:#388E3C; font-weight:bold;'>"
+              "\xe2\x9c\x93 Embedded AI: Active</span>";
+    aiHtml += "</div>";
+
+    // LLM section
+    aiHtml += "<div style='background-color:#F5F9FF; border-radius:8px; padding:12px;"
+              " margin:4px 0; border-left:3px solid #90CAF9;'>";
+    aiHtml += "<span style='font-size:13px; font-weight:bold; color:#0D47A1;'>"
+              "\xF0\x9F\x92\xAC LLM Explanation</span>"
+              "<span style='font-size:10px; color:#888; margin-left:6px;'>"
+              "Ollama / Llama3</span><br>";
+
+    if (!sf.aiExplanation.isEmpty()) {
+        aiHtml += "<br><span style='font-size:12px; color:#333; line-height:1.5;'>"
+                  + sf.aiExplanation + "</span><br>";
+        aiHtml += "<br><span style='font-size:10px; color:#1565C0; font-weight:bold;'>"
+                  "\xe2\x9c\x93 LLM: Active</span>";
+    } else if (m_llmPendingIndex >= 0) {
+        // Still waiting for a response
+        aiHtml += "<br><span style='font-size:12px; color:#1565C0; font-style:italic;'>"
+                  "\xe2\x8f\xb3 Generating LLM explanation...</span><br>";
+        aiHtml += "<br><span style='font-size:10px; color:#90CAF9;'>"
+                  "LLM: Processing</span>";
+    } else {
+        aiHtml += "<br><span style='font-size:12px; color:#999; font-style:italic;'>"
+                  "The LLM explanation service is not currently running. "
+                  "The embedded AI analysis above provides the full assessment.</span><br>";
+        aiHtml += "<br><span style='font-size:10px; color:#B0B0B0;'>"
+                  "\xe2\x9c\x97 LLM: Unavailable</span>";
+    }
+
+    aiHtml += "</div>";
+    detailsAILabel->setText(aiHtml);
+}
+
 // ============================================================================
 // DATABASE SLOTS
 // ============================================================================

@@ -41,16 +41,17 @@ struct SuspiciousFile
     float     cveScore   = 0.0f;    // CVSS base score from NVD (0 = not found)
     qint64    sizeBytes  = 0;
     QDateTime lastModified;
-    QString   aiExplanation;  // LLM-generated threat explanation (async, may be empty initially)
+    QString   aiExplanation;  // LLM-generated threat explanation (Ollama/Llama3, may be empty)
+    bool      llmAvailable = false;  // true if Ollama responded for this finding
 
-    // ── AI anomaly detection metadata (populated by checkByAI) ──────────
+    // ── Embedded AI anomaly detection metadata (populated by checkByAI) ─
     float     anomalyScore    = 0.0f;    // ML model output (0.0–1.0)
     float     anomalyThreshold = 0.5f;   // effective threshold used
     QString   severityLevel;             // "Low" / "Medium" / "High" / "CRITICAL"
     QString   classificationLevel;       // "Anomalous" / "Suspicious" / "CRITICAL"
-    QStringList keyIndicators;           // top contributing factors
-    QString   aiSummary;                 // concise 1-2 sentence explanation
-    QStringList recommendedActions;      // numbered action items
+    QStringList keyIndicators;           // top contributing factors (embedded AI)
+    QString   aiSummary;                 // embedded AI concise explanation
+    QStringList recommendedActions;      // embedded AI action items
 };
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,8 @@ struct CacheEntry
     QString     aiSummary;
     QStringList keyIndicators;
     QStringList recommendedActions;
+    QString     aiExplanation;   // LLM explanation (may be empty)
+    bool        llmAvailable = false;
 };
 
 // ---------------------------------------------------------------------------

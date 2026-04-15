@@ -333,93 +333,68 @@ bool checkByAI(const QString& filePath,
                             fileCat == FileCategory::CompiledArtifact ||
                             fileCat == FileCategory::BuildOutput);
 
-    // ── Stage 2: EXPLANATION (Ollama LLM) ────────────────────────────────
-    LLMExplainer* exp = getExplainer();
-    if (exp) {
-        // Pass classification level so LLM uses appropriate tone.
-        // Developer files get a special "Anomalous-Developer" level for softer wording.
-        std::string llmLevel = classificationToString(cr.level);
-        if (isDeveloperFile && cr.level == ClassificationLevel::Anomalous)
-            llmLevel = "Anomalous-Developer";
-
-        std::string explanation = exp->explain(
-            filePath.toStdString(), features, rawScore, llmLevel);
-
-        if (!explanation.empty() &&
-            explanation.find("[LLM Explainer]") == std::string::npos)
-        {
-            ParsedLLMResponse parsed = parseLLMResponse(explanation);
-
-            if (!parsed.summary.empty())
-                result.aiSummary = parsed.summary;
-
-            if (!parsed.indicators.empty()) {
-                if (parsed.indicators.size() >= result.keyIndicators.size())
-                    result.keyIndicators = parsed.indicators;
-            }
-
-            result.recommendedActions = parsed.actions;
-        }
+    // ── Embedded AI: classification-aware default actions ────────────────
+    // Always generate embedded AI defaults first; LLM may enhance later.
+    if (isDeveloperFile) {
+        result.recommendedActions = {
+            "Verify this file is part of your project or a known tool",
+            "Check if the flagged patterns are expected for this file type",
+            "If the file is unfamiliar, review its origin and last modification date"
+        };
+    } else if (cr.level == ClassificationLevel::Anomalous) {
+        result.recommendedActions = {
+            "Review the file manually to determine if it is expected",
+            "Check the file's origin and whether it was recently modified",
+            "If uncertain, submit the file hash to VirusTotal for verification"
+        };
+    } else if (cr.level == ClassificationLevel::Suspicious) {
+        result.recommendedActions = {
+            "Quarantine the file and prevent execution",
+            "Submit file hash to VirusTotal for multi-engine verification",
+            "Review system logs for signs of prior execution"
+        };
+    } else {  // Critical
+        result.recommendedActions = {
+            "Quarantine the file immediately and prevent execution",
+            "Submit file hash to VirusTotal for multi-engine verification",
+            "Review system logs for signs of prior execution",
+            "Scan connected systems for lateral movement indicators"
+        };
     }
 
-    // ── Classification-aware default actions ─────────────────────────────
-    if (result.recommendedActions.empty()) {
-        if (isDeveloperFile) {
-            // Developer files: soft wording, no quarantine
-            result.recommendedActions = {
-                "Verify this file is part of your project or a known tool",
-                "Check if the flagged patterns are expected for this file type",
-                "If the file is unfamiliar, review its origin and last modification date"
-            };
-        } else if (cr.level == ClassificationLevel::Anomalous) {
-            // Cautious wording for borderline files
-            result.recommendedActions = {
-                "Review the file manually to determine if it is expected",
-                "Check the file's origin and whether it was recently modified",
-                "If uncertain, submit the file hash to VirusTotal for verification"
-            };
-        } else if (cr.level == ClassificationLevel::Suspicious) {
-            result.recommendedActions = {
-                "Quarantine the file and prevent execution",
-                "Submit file hash to VirusTotal for multi-engine verification",
-                "Review system logs for signs of prior execution"
-            };
-        } else {  // Critical
-            result.recommendedActions = {
-                "Quarantine the file immediately and prevent execution",
-                "Submit file hash to VirusTotal for multi-engine verification",
-                "Review system logs for signs of prior execution",
-                "Scan connected systems for lateral movement indicators"
-            };
-        }
+    // ── Embedded AI: classification-aware default summary ─────────────
+    if (isDeveloperFile) {
+        result.aiSummary =
+            "This appears to be a development artifact. The ML model "
+            "detected unusual patterns, but developer files commonly contain "
+            "security-related keywords, API references, and encoded strings "
+            "as part of normal tooling. Manual review recommended; legitimate "
+            "tooling is likely.";
+    } else if (cr.level == ClassificationLevel::Anomalous) {
+        result.aiSummary =
+            "The ML model detected statistical patterns that differ from "
+            "typical benign files. This may be a false positive and warrants "
+            "manual review before taking action.";
+    } else if (cr.level == ClassificationLevel::Suspicious) {
+        result.aiSummary =
+            "The ML anomaly detection model flagged this file based on "
+            "multiple indicators of potentially malicious behavior. "
+            "The file exhibits characteristics inconsistent with benign software.";
+    } else {  // Critical
+        result.aiSummary =
+            "The ML model detected strong indicators of malicious intent "
+            "including multiple high-confidence signals. Immediate action "
+            "is recommended.";
     }
 
-    // ── Classification-aware default summary ─────────────────────────────
-    if (result.aiSummary.empty()) {
-        if (isDeveloperFile) {
-            result.aiSummary =
-                "This appears to be a development artifact. The ML model "
-                "detected unusual patterns, but developer files commonly contain "
-                "security-related keywords, API references, and encoded strings "
-                "as part of normal tooling. Manual review recommended; legitimate "
-                "tooling is likely.";
-        } else if (cr.level == ClassificationLevel::Anomalous) {
-            result.aiSummary =
-                "The ML model detected statistical patterns that differ from "
-                "typical benign files. This may be a false positive and warrants "
-                "manual review before taking action.";
-        } else if (cr.level == ClassificationLevel::Suspicious) {
-            result.aiSummary =
-                "The ML anomaly detection model flagged this file based on "
-                "multiple indicators of potentially malicious behavior. "
-                "The file exhibits characteristics inconsistent with benign software.";
-        } else {  // Critical
-            result.aiSummary =
-                "The ML model detected strong indicators of malicious intent "
-                "including multiple high-confidence signals. Immediate action "
-                "is recommended.";
-        }
-    }
+    // ── LLM EXPLANATION ────────────────────────────────────────────────
+    // LLM explanations are now generated ON-DEMAND when the user selects
+    // a finding in the UI (MainWindow).  This eliminates inconsistency
+    // caused by parallel LLM calls during the scan pipeline.
+    //
+    // The scan only checks whether Ollama is reachable so the dashboard
+    // can display the correct status indicator.
+    bool llmWasAvailable = (getExplainer() != nullptr);
 
     // ── Terminal output (single, clean print — no duplicates) ────────────
     std::cout << formatTerminalOutput(result) << std::flush;
@@ -466,6 +441,10 @@ bool checkByAI(const QString& filePath,
         for (const auto& act : result.recommendedActions)
             qActions.append(QString::fromStdString(act));
         outDetails->recommendedActions = qActions;
+
+        // LLM explanation is generated on-demand in the UI; leave empty here.
+        // Only store the Ollama availability flag for dashboard status.
+        outDetails->llmAvailable  = llmWasAvailable;
     }
 
     return true;

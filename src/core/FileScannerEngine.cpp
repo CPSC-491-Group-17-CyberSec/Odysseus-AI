@@ -165,6 +165,8 @@ void FileScannerWorker::doScan()
                 sf.aiSummary           = ce.aiSummary;
                 sf.keyIndicators       = ce.keyIndicators;
                 sf.recommendedActions  = ce.recommendedActions;
+                sf.aiExplanation       = ce.aiExplanation;
+                sf.llmAvailable        = ce.llmAvailable;
 
                 emit suspiciousFileFound(sf);
                 m_suspiciousCount.fetchAndAddRelaxed(1);

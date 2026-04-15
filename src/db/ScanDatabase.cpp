@@ -83,6 +83,8 @@ static const char* kMigrateCacheColumns[] = {
     "ALTER TABLE scan_cache ADD COLUMN ai_summary            TEXT;",
     "ALTER TABLE scan_cache ADD COLUMN key_indicators        TEXT;",
     "ALTER TABLE scan_cache ADD COLUMN recommended_actions   TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN ai_explanation        TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN llm_available         INTEGER DEFAULT 0;",
     nullptr
 };
 
@@ -523,7 +525,8 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
     const char* sql =
         "SELECT file_path, last_modified, file_size, scan_result, "
         "       reason, category, classification_level, severity_level, "
-        "       anomaly_score, ai_summary, key_indicators, recommended_actions "
+        "       anomaly_score, ai_summary, key_indicators, recommended_actions, "
+        "       ai_explanation, llm_available "
         "FROM scan_cache;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -559,6 +562,8 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
             QString ra = colText(11);
             if (!ra.isEmpty())
                 e.recommendedActions = ra.split('\n', Qt::SkipEmptyParts);
+            e.aiExplanation  = colText(12);
+            e.llmAvailable   = (sqlite3_column_int(stmt, 13) != 0);
             ++nFlagged;
         } else {
             ++nClean;
@@ -593,8 +598,9 @@ void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
             "INSERT OR REPLACE INTO scan_cache "
             "(file_path, last_modified, last_scanned_at, file_size, scan_result, "
             " reason, category, classification_level, severity_level, "
-            " anomaly_score, ai_summary, key_indicators, recommended_actions) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            " anomaly_score, ai_summary, key_indicators, recommended_actions, "
+            " ai_explanation, llm_available) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
         execSql(db, "BEGIN;");
         int nClean = 0, nFlagged = 0;
@@ -616,6 +622,8 @@ void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
             bindText (stmt, 11, e.aiSummary);
             bindText (stmt, 12, e.keyIndicators.join('\n'));
             bindText (stmt, 13, e.recommendedActions.join('\n'));
+            bindText (stmt, 14, e.aiExplanation);
+            sqlite3_bind_int(stmt, 15, e.llmAvailable ? 1 : 0);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
 

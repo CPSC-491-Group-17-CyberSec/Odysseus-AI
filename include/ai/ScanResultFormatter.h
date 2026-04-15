@@ -687,9 +687,12 @@ struct ScanResult
     // Key indicators (top contributing factors)
     std::vector<std::string> keyIndicators;
 
-    // --- Explanation stage (Ollama LLM) ---
+    // --- Embedded AI explanation (always populated) ---
     std::string              aiSummary;
     std::vector<std::string> recommendedActions;
+
+    // --- LLM explanation (Ollama / Llama3 — empty if unavailable) ---
+    std::string              llmExplanation;
 
     // --- Raw data ---
     std::vector<float> features;
@@ -861,17 +864,17 @@ inline std::string formatTerminalOutput(const ScanResult& result)
     ss << "  " << CYAN << "Verdict:   " << RESET
        << clColor << BOLD << classificationToString(result.classification) << RESET << "\n";
 
-    // Key Indicators
+    // Key Indicators  [EMBEDDED-AI]
     if (!result.keyIndicators.empty()) {
-        ss << "\n  " << BOLD << "Key Indicators:" << RESET << "\n";
+        ss << "\n  " << BOLD << "[EMBEDDED-AI] Key Indicators:" << RESET << "\n";
         for (const auto& indicator : result.keyIndicators) {
             ss << "    " << DIM << "•" << RESET << " " << indicator << "\n";
         }
     }
 
-    // AI Summary
+    // Embedded AI Summary
     if (!result.aiSummary.empty()) {
-        ss << "\n  " << BOLD << "AI Summary:" << RESET << "\n";
+        ss << "\n  " << BOLD << "[EMBEDDED-AI] Summary:" << RESET << "\n";
         std::istringstream words(result.aiSummary);
         std::string word;
         int lineLen = 0;
@@ -888,13 +891,37 @@ inline std::string formatTerminalOutput(const ScanResult& result)
         ss << "\n";
     }
 
-    // Recommended Actions
+    // Embedded AI Recommended Actions
     if (!result.recommendedActions.empty()) {
-        ss << "\n  " << BOLD << "Recommended Actions:" << RESET << "\n";
+        ss << "\n  " << BOLD << "[EMBEDDED-AI] Recommended Actions:" << RESET << "\n";
         for (size_t i = 0; i < result.recommendedActions.size(); ++i) {
             ss << "    " << GREEN << (i + 1) << "." << RESET
                << " " << result.recommendedActions[i] << "\n";
         }
+    }
+
+    // LLM Explanation (Ollama / Llama3)  –  separate section
+    const char* MAGENTA = "\033[35m";
+    if (!result.llmExplanation.empty()) {
+        ss << "\n  " << MAGENTA << BOLD << "[LLM] Explanation (Ollama / Llama3):" << RESET << "\n";
+        // Word-wrap the LLM response
+        std::istringstream llmWords(result.llmExplanation);
+        std::string w;
+        int ll = 0;
+        ss << "    ";
+        while (llmWords >> w) {
+            if (ll + static_cast<int>(w.size()) + 1 > 60 && ll > 0) {
+                ss << "\n    ";
+                ll = 0;
+            }
+            if (ll > 0) { ss << " "; ll++; }
+            ss << w;
+            ll += static_cast<int>(w.size());
+        }
+        ss << "\n";
+    } else {
+        ss << "\n  " << DIM << "[LLM] Explanation unavailable — "
+           << "showing embedded AI summary instead" << RESET << "\n";
     }
 
     // Bottom border

@@ -217,6 +217,8 @@ void FileScannerWorker::runHashWorker()
             ce.aiSummary           = sf.aiSummary;
             ce.keyIndicators       = sf.keyIndicators;
             ce.recommendedActions  = sf.recommendedActions;
+            ce.aiExplanation       = sf.aiExplanation;
+            ce.llmAvailable        = sf.llmAvailable;
             localCache.append(std::move(ce));
         } else {
             // File is clean – record for incremental-scan cache.
