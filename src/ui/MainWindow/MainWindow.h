@@ -8,6 +8,8 @@
 #include "../../db/ScanDatabase.h"   // for SuspiciousFile, ScanRecord
 #include "../ScanTypeOverlay/ScanTypeOverlay.h"
 
+class LLMExplainer;
+
 class QPushButton;
 class QTableWidget;
 class QTableWidgetItem;
@@ -61,6 +63,9 @@ private slots:
     // ---- CVE lookup ----
     void onCveLookupReply(QNetworkReply* reply);
 
+    // ---- On-demand LLM explanation ----
+    void onLlmExplanationReady(int findingIndex, const QString& explanation, bool success);
+
     // ---- Database ----
     void onDbRecordSaved(qint64 scanId);
     void onCacheUpdateReady(const QVector<CacheEntry>& entries);
@@ -94,6 +99,12 @@ private:
     // Kick off NVD API query for a single finding
     void lookupCveForFinding(int findingIndex);
 
+    // Fire an async LLM explanation request for a finding
+    void requestLlmExplanation(int findingIndex);
+
+    // Refresh the detail panel LLM section (called after LLM completes)
+    void refreshDetailLlmSection(const SuspiciousFile& sf);
+
     // Format elapsed seconds as MM:SS
     static QString formatElapsed(int secs);
 
@@ -112,12 +123,25 @@ private:
     QLineEdit*    searchInput;
     QComboBox*    severityFilter;
 
-    // Threat-details panel (existing, untouched)
+    // Threat-details panel
     QFrame*  detailsPanel;
     QLabel*  detailsTitleLabel;
     QLabel*  detailsDescLabel;
     QLabel*  detailsAILabel;
     QLabel*  detailsMitreLabel;
+
+    // -----------------------------------------------------------------------
+    // AI Stats dashboard (replaces static stats)
+    // -----------------------------------------------------------------------
+    QLabel*  aiStatsTotalLabel;
+    QLabel*  aiStatsCritLabel;
+    QLabel*  aiStatsSuspLabel;
+    QLabel*  aiStatsReviewLabel;
+    QLabel*  aiStatsCleanLabel;
+    QLabel*  aiStatsAvgScoreLabel;
+    QLabel*  aiStatsModelLabel;
+    QLabel*  aiStatsLlmLabel;           // LLM status indicator
+    QFrame*  aiScoreFillBar;            // visual score indicator
 
     // -----------------------------------------------------------------------
     // Scan-results panel
@@ -175,6 +199,13 @@ private:
 
     // Track how many CVE queries are in flight
     int m_pendingCveQueries = 0;
+
+    // On-demand LLM explanation
+    LLMExplainer* m_llmExplainer      = nullptr;
+    bool          m_llmChecked        = false;   // have we probed Ollama yet?
+    bool          m_llmReachable      = false;   // is Ollama reachable?
+    int           m_llmPendingIndex   = -1;      // finding index being queried (-1 = idle)
+    int           m_detailFindingIdx  = -1;      // finding currently shown in detail panel
 
     // Database
     ScanDatabase* m_db        = nullptr;

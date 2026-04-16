@@ -1,0 +1,40 @@
+{
+    "application": "Odysseus-AI",
+    "version": "2.0.0",
+    "api": {
+        "base_url": "http://localhost:8080",
+        "timeout_ms": 30000,
+        "retry_count": 3,
+        "endpoints": {
+            "scan": "/api/v1/scan",
+            "results": "/api/v1/results",
+            "history": "/api/v1/history",
+            "health": "/api/v1/health"
+        }
+    },
+    "scanner": {
+        "max_file_size_mb": 200,
+        "thread_count": 4,
+        "hash_db_path": "data/malware_hashes.txt",
+        "model_path": "data/anomaly_model_v2.onnx",
+        "anomaly_threshold": 0.65
+    },
+    "llm": {
+        "provider": "ollama",
+        "model": "llama3",
+        "endpoint": "http://localhost:11434/api/generate",
+        "timeout_ms": 60000,
+        "max_tokens": 512
+    },
+    "database": {
+        "path": "odysseus_scans.db",
+        "cache_max_entries": 50000,
+        "prune_interval_scans": 5
+    },
+    "logging": {
+        "level": "info",
+        "file": "odysseus.log",
+        "max_size_mb": 50,
+        "rotate_count": 5
+    }
+}

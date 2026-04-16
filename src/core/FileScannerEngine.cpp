@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QThread>
+#include <QDebug>
 
 // ============================================================================
 // shouldSkipDirectory
@@ -56,6 +57,8 @@ void FileScannerWorker::doScan()
     m_totalScanned.storeRelaxed(0);
     m_suspiciousCount.storeRelaxed(0);
     m_bytesScanned.storeRelaxed(0);
+    m_cacheHits.storeRelaxed(0);
+    m_cacheMisses.storeRelaxed(0);
     m_enumDone = false;
     m_sharedCacheUpdates.clear();
 
@@ -136,10 +139,38 @@ void FileScannerWorker::doScan()
         const QString ext          = fi.suffix().toLower();
         const QString lastModified = fi.lastModified().toString(Qt::ISODate);
 
-        // Cache hit: file unchanged since last scan – skip hashing.
+        // Cache hit: file unchanged since last scan – skip hashing/AI.
+        // Key: path + lastModified + fileSize must all match.
         const auto cacheIt = m_scanCache.constFind(absPath);
-        if (cacheIt != m_scanCache.constEnd() && cacheIt.value() == lastModified) {
+        if (cacheIt != m_scanCache.constEnd()
+            && cacheIt.value().lastModified == lastModified
+            && cacheIt.value().fileSize == fi.size())
+        {
             m_totalScanned.fetchAndAddRelaxed(1);
+            m_cacheHits.fetchAndAddRelaxed(1);
+
+            // If the cached result was flagged, replay the finding.
+            if (cacheIt.value().isFlagged) {
+                const CacheEntry& ce = cacheIt.value();
+                SuspiciousFile sf;
+                sf.filePath            = absPath;
+                sf.fileName            = fi.fileName();
+                sf.reason              = ce.reason;
+                sf.category            = ce.category;
+                sf.sizeBytes           = ce.fileSize;
+                sf.lastModified        = fi.lastModified();
+                sf.classificationLevel = ce.classificationLevel;
+                sf.severityLevel       = ce.severityLevel;
+                sf.anomalyScore        = ce.anomalyScore;
+                sf.aiSummary           = ce.aiSummary;
+                sf.keyIndicators       = ce.keyIndicators;
+                sf.recommendedActions  = ce.recommendedActions;
+                sf.aiExplanation       = ce.aiExplanation;
+                sf.llmAvailable        = ce.llmAvailable;
+
+                emit suspiciousFileFound(sf);
+                m_suspiciousCount.fetchAndAddRelaxed(1);
+            }
             continue;
         }
 
@@ -177,7 +208,17 @@ void FileScannerWorker::doScan()
     emit progressUpdated(100);
     const int elapsed = static_cast<int>(wallTimer.elapsed() / 1000);
 
-    // Emit accumulated clean-file cache updates for DB persistence.
+    // Log cache performance summary.
+    const int hits   = m_cacheHits.loadRelaxed();
+    const int misses = m_cacheMisses.loadRelaxed();
+    const int total  = hits + misses;
+    qDebug() << "[CACHE] Scan complete."
+             << "Cache hits:" << hits
+             << "| Fresh scans:" << misses
+             << "| Total files:" << m_totalScanned.loadRelaxed()
+             << "| Hit rate:" << (total > 0 ? QString::number(100.0 * hits / total, 'f', 1) + "%" : "N/A");
+
+    // Emit accumulated cache updates for DB persistence.
     if (!m_sharedCacheUpdates.isEmpty())
         emit cacheUpdateReady(m_sharedCacheUpdates);
 
@@ -207,7 +248,7 @@ bool FileScanner::isRunning() const
 }
 
 void FileScanner::startScan(const QString& rootPath,
-                             QHash<QString, QString> scanCache,
+                             QHash<QString, CacheEntry> scanCache,
                              const QString& resumeFromDir)
 {
     if (m_thread && m_thread->isRunning())

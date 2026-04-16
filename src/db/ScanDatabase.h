@@ -68,10 +68,12 @@ public:
     // Load just the N most-recent scan headers (no findings) – fast overview.
     QVector<ScanRecord> loadRecentScanHeaders(int n = 50) const;
 
-    // Load the entire scan cache into memory as path → lastModified.
+    // Load the entire scan cache into memory as path → CacheEntry.
     // Call this on the UI thread before starting a scan; pass the result
     // to FileScanner::startScan() so the worker can do cache lookups.
-    QHash<QString, QString> loadScanCache() const;
+    // Extended (v2): includes flagged-file metadata so cached findings
+    // can be replayed without re-scanning.
+    QHash<QString, CacheEntry> loadScanCache() const;
 
     // Persist a batch of newly-clean file entries into the scan_cache table.
     // Non-blocking: enqueues the work for the writer thread.

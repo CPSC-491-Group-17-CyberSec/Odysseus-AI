@@ -173,12 +173,25 @@ void FileScannerWorker::runHashWorker()
         if (m_cancelFlag->loadRelaxed() != 0)
             break;
 
-        // Count every dequeued file as "scanned".
+        // Count every dequeued file as "scanned" and as a cache miss
+        // (these items were not served from cache – they need full analysis).
         m_totalScanned.fetchAndAddRelaxed(1);
+        m_cacheMisses.fetchAndAddRelaxed(1);
 
         QString reason, category;
+        bool flagged = false;
+        SuspiciousFile sf;  // pre-allocate; AI pass populates extra fields
+
+        // --- Detection pass 1: known-hash lookup ---
         if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category)) {
-            SuspiciousFile sf;
+            flagged = true;
+        }
+        // --- Detection pass 2: AI anomaly scoring (fallback) ---
+        else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
+            flagged = true;
+        }
+
+        if (flagged) {
             sf.filePath     = item.filePath;
             sf.fileName     = QFileInfo(item.filePath).fileName();
             sf.reason       = reason;
@@ -189,9 +202,32 @@ void FileScannerWorker::runHashWorker()
             // Thread-safe: queued connection delivers to the UI thread.
             emit suspiciousFileFound(sf);
             m_suspiciousCount.fetchAndAddRelaxed(1);
+
+            // Cache the flagged result so subsequent scans can replay it.
+            CacheEntry ce;
+            ce.filePath            = item.filePath;
+            ce.lastModified        = item.lastModified;
+            ce.fileSize            = item.fileSize;
+            ce.isFlagged           = true;
+            ce.reason              = reason;
+            ce.category            = category;
+            ce.classificationLevel = sf.classificationLevel;
+            ce.severityLevel       = sf.severityLevel;
+            ce.anomalyScore        = sf.anomalyScore;
+            ce.aiSummary           = sf.aiSummary;
+            ce.keyIndicators       = sf.keyIndicators;
+            ce.recommendedActions  = sf.recommendedActions;
+            ce.aiExplanation       = sf.aiExplanation;
+            ce.llmAvailable        = sf.llmAvailable;
+            localCache.append(std::move(ce));
         } else {
             // File is clean – record for incremental-scan cache.
-            localCache.append({ item.filePath, item.lastModified });
+            CacheEntry ce;
+            ce.filePath     = item.filePath;
+            ce.lastModified = item.lastModified;
+            ce.fileSize     = item.fileSize;
+            ce.isFlagged    = false;
+            localCache.append(std::move(ce));
         }
     }
 
