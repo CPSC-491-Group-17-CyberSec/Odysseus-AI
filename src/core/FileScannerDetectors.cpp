@@ -29,6 +29,8 @@
 #include "FileScanner.h"
 #include "ai/AnomalyDetector.h"
 #include "ai/FeatureExtractor.h"
+#include "ai/EmberFeatureExtractor.h"
+#include "ai/EmberDetector.h"
 #include "ai/LLMExplainer.h"
 #include "ai/ScanResultFormatter.h"
 #include "ai/FileTypeScoring.h"
@@ -37,6 +39,7 @@
 #include <QFileInfo>
 #include <QMutex>
 #include <iostream>
+#include <iomanip>
 
 // ============================================================================
 // Singleton detector – loaded once, shared by all scanner instances
@@ -44,10 +47,28 @@
 namespace {
 
 QMutex g_detectorInitMutex;
-AnomalyDetector* g_detector = nullptr;
+AnomalyDetector* g_detector      = nullptr;  // v2/v3 model (38 features)
+AnomalyDetector* g_emberOnnxDet  = nullptr;  // v4 EMBER ONNX fallback (2381 features, ~86.5%)
+EmberDetector*   g_emberLgbmDet  = nullptr;  // v4 EMBER LightGBM native (~96.5%)
 bool g_initAttempted = false;
 
-/// Lazy-initialize the global AnomalyDetector.
+/// Find a model file in standard search paths relative to the app dir.
+QString findModel(const QString& appDir, const QString& filename)
+{
+    const QStringList candidates = {
+        appDir + "/data/" + filename,
+        appDir + "/../data/" + filename,
+        appDir + "/../../data/" + filename,
+        appDir + "/../../../data/" + filename,
+    };
+    for (const QString& path : candidates) {
+        if (QFileInfo::exists(path))
+            return path;
+    }
+    return {};
+}
+
+/// Lazy-initialize both global detectors (v2/v3 and v4 EMBER).
 AnomalyDetector* getDetector()
 {
     QMutexLocker lock(&g_detectorInitMutex);
@@ -58,28 +79,74 @@ AnomalyDetector* getDetector()
     g_initAttempted = true;
 
     const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        appDir + "/data/anomaly_model_v2.onnx",
-        appDir + "/../data/anomaly_model_v2.onnx",
-        appDir + "/../../data/anomaly_model_v2.onnx",
-        appDir + "/../../../data/anomaly_model_v2.onnx",
-    };
 
-    for (const QString& path : candidates) {
-        if (!QFileInfo::exists(path))
-            continue;
-
+    // ── Load v2/v3 model (38-feature general anomaly detection) ─────────
+    QString v2Path = findModel(appDir, "anomaly_model_v2.onnx");
+    if (!v2Path.isEmpty()) {
         auto* det = new AnomalyDetector();
-        if (det->loadModel(path.toStdString())) {
+        if (det->loadModel(v2Path.toStdString())) {
             g_detector = det;
-            std::cout << "[AI] Model loaded: " << path.toStdString() << std::endl;
-            return g_detector;
+            std::cout << "[AI] v2/v3 model loaded: " << v2Path.toStdString()
+                      << " (" << det->expectedFeatureCount() << " features)" << std::endl;
+        } else {
+            delete det;
         }
-        delete det;
     }
 
-    std::cout << "[AI] No anomaly_model_v2.onnx found — hash-only mode." << std::endl;
-    return nullptr;
+    if (!g_detector)
+        std::cout << "[AI] No anomaly_model_v2.onnx found — v2/v3 disabled." << std::endl;
+
+    // ── Load v4 EMBER layer ────────────────────────────────────────────
+    // Try LightGBM native model first (96.5% accuracy), fall back to ONNX (86.5%)
+    bool emberLoaded = false;
+
+    // Option A: LightGBM native model + scaler
+    QString lgbmModelPath  = findModel(appDir, "ember_lgbm_model.txt");
+    QString lgbmScalerPath = findModel(appDir, "ember_scaler.bin");
+    if (!lgbmModelPath.isEmpty() && !lgbmScalerPath.isEmpty()) {
+        auto* det = new EmberDetector();
+        if (det->load(lgbmModelPath.toStdString(), lgbmScalerPath.toStdString())) {
+            g_emberLgbmDet = det;
+            std::cout << "[AI] v4 EMBER LightGBM loaded (~96.5% accuracy)" << std::endl;
+            emberLoaded = true;
+        } else {
+            delete det;
+        }
+    }
+
+    // Option B: ONNX distilled model (fallback)
+    if (!emberLoaded) {
+        QString v4Path = findModel(appDir, "anomaly_model_v4_ember.onnx");
+        if (!v4Path.isEmpty()) {
+            auto* det = new AnomalyDetector();
+            if (det->loadModel(v4Path.toStdString())) {
+                g_emberOnnxDet = det;
+                std::cout << "[AI] v4 EMBER ONNX loaded: " << v4Path.toStdString()
+                          << " (~86.5% accuracy, distilled)" << std::endl;
+                emberLoaded = true;
+            } else {
+                delete det;
+            }
+        }
+    }
+
+    if (!emberLoaded)
+        std::cout << "[AI] No EMBER model found — PE-specific detection disabled." << std::endl;
+
+    if (!g_detector && !emberLoaded)
+        std::cout << "[AI] No models found — hash-only mode." << std::endl;
+
+    return g_detector;
+}
+
+/// Ensure all detectors are initialized (called lazily).
+void ensureInitialized()
+{
+    QMutexLocker lock(&g_detectorInitMutex);
+    if (!g_initAttempted) {
+        lock.unlock();
+        getDetector();  // triggers initialization of all models
+    }
 }
 
 // ============================================================================
@@ -148,6 +215,7 @@ bool checkByAI(const QString& filePath,
 
     // ── Stage 1: DETECTION (ONNX Model) ──────────────────────────────────
 
+    // Always extract v2/v3 features (38-dim) for the calibration pipeline
     std::vector<float> features = extractFeatures(filePath.toStdString());
     if (features.empty())
         return false;
@@ -155,6 +223,41 @@ bool checkByAI(const QString& filePath,
     float rawScore = det->score(features);
     if (rawScore < 0.0f)
         return false;  // extraction or inference error
+
+    // ── Stage 1b: EMBER DETECTION (v4, PE files only) ───────────────────
+    // If the file is a PE, run a second inference pass with the 2381-feature
+    // EMBER vector.  Tries LightGBM native (~96.5%) first, falls back to
+    // ONNX distilled (~86.5%).  Uses max(v2_score, v4_score) as raw score.
+    float emberScore = -1.0f;
+
+    if (features[16] > 0.5f) {  // features[16] = isPE flag from v2/v3
+        ensureInitialized();
+
+        std::vector<float> emberFeatures = extractEmberFeatures(filePath.toStdString());
+        if (!emberFeatures.empty()) {
+            // Try LightGBM native first (full accuracy)
+            if (g_emberLgbmDet && g_emberLgbmDet->isLoaded()) {
+                emberScore = g_emberLgbmDet->score(emberFeatures);
+                if (emberScore >= 0.0f) {
+                    std::cout << "[AI:EMBER] PE file — LightGBM score: "
+                              << std::fixed << std::setprecision(3) << emberScore
+                              << "  (v2/v3 score: " << rawScore << ")" << std::endl;
+                }
+            }
+            // Fall back to ONNX v4
+            else if (g_emberOnnxDet && g_emberOnnxDet->isLoaded()) {
+                emberScore = g_emberOnnxDet->score(emberFeatures);
+                if (emberScore >= 0.0f) {
+                    std::cout << "[AI:EMBER] PE file — ONNX score: "
+                              << std::fixed << std::setprecision(3) << emberScore
+                              << "  (v2/v3 score: " << rawScore << ")" << std::endl;
+                }
+            }
+
+            if (emberScore >= 0.0f)
+                rawScore = std::max(rawScore, emberScore);
+        }
+    }
 
     // ── CLASSIFICATION (Phase 2: calibrated per-type pipeline) ───────────
     std::string ext = extractExtension(filePath.toStdString());

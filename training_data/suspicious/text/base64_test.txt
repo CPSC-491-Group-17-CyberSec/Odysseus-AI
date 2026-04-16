@@ -1,0 +1,44 @@
+# Base64 Encoded Payload Test File
+# This file contains base64-encoded strings that LOOK suspicious
+# but are completely harmless demo content.
+#
+# Purpose: Train the anomaly detector to flag files with embedded
+# base64 payloads, which is a common malware obfuscation technique.
+
+payload_1 = "cG93ZXJzaGVsbCAtZXhlY3V0aW9ucG9saWN5IGJ5cGFzcyAtbm9wcm9maWxlIC1jb21tYW5kICJXcml0ZS1Ib3N0ICdIZWxsbyBXb3JsZCci"
+payload_2 = "Y21kLmV4ZSAvYyBlY2hvIFRoaXMgaXMgYSB0ZXN0IG1lc3NhZ2UgZnJvbSBPZHlzc2V1cy1BSQ=="
+payload_3 = "aHR0cDovLzE5Mi4xNjguMS4xMDA6NDQ0NC9wYXlsb2FkLmV4ZQ=="
+payload_4 = "SUtFWV9MT0NBTF9NQUNISU5FXFNPRlRXQVJFXE1pY3Jvc29mdFxXaW5kb3dzXEN1cnJlbnRWZXJzaW9uXFJ1bg=="
+
+# Simulated obfuscated command
+encoded_cmd = "JGNsaWVudCA9IE5ldy1PYmplY3QgU3lzdGVtLk5ldC5Tb2NrZXRzLlRDUENsaWVudCgiMTAuMC4wLjEiLCA0NDQ0KQ=="
+
+# Multiple concatenated base64 blocks (mimics staged payload)
+stage1 = "V3JpdGUtSG9zdCAiU3RhZ2UgMSBjb21wbGV0ZSI="
+stage2 = "V3JpdGUtSG9zdCAiU3RhZ2UgMiBjb21wbGV0ZSI="
+stage3 = "V3JpdGUtSG9zdCAiU3RhZ2UgMyBjb21wbGV0ZSI="
+
+# Long base64 blob (simulates encoded binary)
+big_payload = "TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAA4fug4AtAnNIbgBTM0hVGhpcyBwcm9ncmFtIGNhbm5vdCBiZSBydW4gaW4gRE9TIG1vZGUuDQ0KJAAAAAAAAABQRQAATAEDAAAAAAAAAAAAAAAAAOAAAgELAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+# IP addresses that look like C2 servers
+suspicious_ips = [
+    "192.168.1.100",
+    "10.0.0.1",
+    "172.16.0.50",
+    "203.0.113.42",
+]
+
+# Suspicious-looking URLs
+suspicious_urls = [
+    "http://evil-domain.example.com/payload.exe",
+    "https://malware-c2.example.net/beacon",
+    "http://192.168.1.100:4444/stage2",
+]
+
+# Registry keys commonly targeted by malware
+registry_targets = [
+    "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+    "HKLM\\SYSTEM\\CurrentControlSet\\Services",
+]

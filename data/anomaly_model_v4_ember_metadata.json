@@ -1,0 +1,31 @@
+{
+  "version": "v4",
+  "model_type": "lightgbm",
+  "dataset": "EMBER-2018-v2",
+  "n_features": 2381,
+  "n_train": 600000,
+  "n_test": 200000,
+  "metrics": {
+    "accuracy": 0.96552,
+    "roc_auc": 0.9935390788,
+    "fpr": 0.03678,
+    "tpr": 0.96782,
+    "precision": 0.9633884132988254,
+    "fp": 3678,
+    "fn": 3218,
+    "tp": 96782,
+    "tn": 96322,
+    "distilled_accuracy": 0.865105,
+    "distilled_auc": 0.9527401078
+  },
+  "onnx_size_bytes": 29179,
+  "input_name": "features",
+  "input_shape": [
+    "N",
+    2381
+  ],
+  "output_names": [
+    "label",
+    "probabilities"
+  ]
+}

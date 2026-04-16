@@ -1,0 +1,15 @@
+{
+  "model_type": "LogisticRegression_with_StandardScaler",
+  "n_features": 38,
+  "dataset": "/sessions/inspiring-friendly-cori/training_data/dataset_v2.csv",
+  "dataset_size": 2845,
+  "n_benign": 1845,
+  "n_malicious": 1000,
+  "train_size": 2276,
+  "test_size": 569,
+  "test_accuracy": 1.0,
+  "test_fpr": 0.0,
+  "test_tpr": 1.0,
+  "test_f1": 1.0,
+  "note": "Trained with real benign data + synthetic malware features. Logistic regression used because sklearn/xgboost unavailable. Consider retraining with XGBoost when dependencies are available."
+}

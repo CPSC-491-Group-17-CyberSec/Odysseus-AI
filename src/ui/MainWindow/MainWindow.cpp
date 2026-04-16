@@ -41,6 +41,7 @@
 #include <QDirIterator>
 #include <QResizeEvent>
 #include <QThread>
+#include <QPixmap>
 
 // ============================================================================
 // Helpers
@@ -199,8 +200,18 @@ void MainWindow::setupUi()
     // =========================================================================
     auto* headerLayout = new QHBoxLayout();
 
-    auto* logoLabel = new QLabel("[ O ]");
-    logoLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #1a1aff; letter-spacing: 2px;");
+    auto* logoLabel = new QLabel();
+    logoLabel->setStyleSheet("background: transparent;");
+    {
+        // Use 128px source for Retina crispness, scale to 40x40 logical pixels
+        QPixmap logoPixmap(":/icons/logo_icon_128.png");
+        if (logoPixmap.isNull())
+            logoPixmap = QPixmap(":/icons/logo_icon.png");
+        logoLabel->setPixmap(logoPixmap.scaled(40, 40, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    logoLabel->setFixedSize(44, 44);
+    logoLabel->setAlignment(Qt::AlignCenter);
+    logoLabel->setAttribute(Qt::WA_TranslucentBackground);
 
     auto* titleLabel = new QLabel("<b>Odysseus</b> Threat Dashboard");
     titleLabel->setStyleSheet("font-size: 26px; color: #000000;");

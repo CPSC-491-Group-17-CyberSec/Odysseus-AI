@@ -1,0 +1,46 @@
+{
+  "version": "v3",
+  "phase": 4,
+  "trained_at": "2026-04-14T20:05:16.213480",
+  "model_type": "BaggedLogisticEnsemble",
+  "n_features": 38,
+  "n_estimators": 25,
+  "dataset": "dataset_v3.csv",
+  "dataset_size": 1239,
+  "train_size": 992,
+  "test_size": 247,
+  "test_accuracy": 0.9959514170040485,
+  "test_auc": 0.9994944388270981,
+  "test_fpr": 0.011627906976744186,
+  "test_tpr": 1.0,
+  "confusion_matrix": {
+    "TN": 85,
+    "FP": 1,
+    "FN": 0,
+    "TP": 161
+  },
+  "per_source_class": {
+    "benign": {
+      "n": 8,
+      "mean": 0.15154334902763367,
+      "std": 0.2854299545288086
+    },
+    "synthetic_benign": {
+      "n": 78,
+      "mean": 0.020372267812490463,
+      "std": 0.016573017463088036
+    },
+    "synthetic_malware": {
+      "n": 161,
+      "mean": 0.9622248411178589,
+      "std": 0.037584152072668076
+    }
+  },
+  "score_stats": {
+    "benign_mean": 0.03257422894239426,
+    "benign_max": 0.8935879468917847,
+    "flagged_mean": 0.9622248411178589,
+    "flagged_min": 0.757598340511322,
+    "score_gap": -0.13598960638046265
+  }
+}

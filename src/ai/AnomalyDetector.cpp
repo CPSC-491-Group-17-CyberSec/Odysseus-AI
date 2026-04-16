@@ -2,11 +2,13 @@
 // AnomalyDetector.cpp  –  ONNX Runtime inference for anomaly scoring
 //
 // Uses the ONNX Runtime C++ API to load and run a trained model that
-// classifies files as benign (0) or malicious (1) based on the 38-feature
-// vector produced by FeatureExtractor.
+// classifies files as benign (0) or malicious (1).  Supports:
+//   - v2/v3 models: 38-feature vectors (general anomaly detection)
+//   - v4 model:     2381-feature vectors (EMBER PE malware detection)
 //
-// The model is expected to be a binary classifier exported from scikit-learn
-// (via skl2onnx) or XGBoost (via onnxmltools).  The output is either:
+// The expected input dimension is auto-detected from the model at load time.
+//
+// The output is either:
 //   - A probability array [p_benign, p_malicious]  (we return p_malicious)
 //   - A single float score                          (we return it directly)
 // ============================================================================
@@ -46,6 +48,7 @@ struct AnomalyDetector::Impl
     std::vector<std::string>     outputNames;
     std::vector<const char*>     inputNamePtrs;
     std::vector<const char*>     outputNamePtrs;
+    int featureCount = 0;        // auto-detected from model input shape
 #endif
     bool loaded = false;
 };
@@ -108,10 +111,21 @@ bool AnomalyDetector::loadModel(const std::string& onnxPath)
             m_impl->outputNamePtrs[i] = m_impl->outputNames[i].c_str();
         }
 
+        // Auto-detect expected feature count from input shape
+        // Input shape is typically [N, featureCount] or [-1, featureCount]
+        auto inputTypeInfo = m_impl->session->GetInputTypeInfo(0);
+        auto inputShape = inputTypeInfo.GetTensorTypeAndShapeInfo().GetShape();
+        if (inputShape.size() >= 2 && inputShape[1] > 0) {
+            m_impl->featureCount = static_cast<int>(inputShape[1]);
+        } else {
+            m_impl->featureCount = 38;  // fallback for dynamic shapes
+        }
+
         m_impl->loaded = true;
         std::cout << "[AnomalyDetector] Model loaded: " << onnxPath
                   << " (" << numInputs << " inputs, "
-                  << numOutputs << " outputs)" << std::endl;
+                  << numOutputs << " outputs, "
+                  << m_impl->featureCount << " features)" << std::endl;
         return true;
     }
     catch (const Ort::Exception& e) {
@@ -132,6 +146,15 @@ bool AnomalyDetector::isLoaded() const
     return m_impl && m_impl->loaded;
 }
 
+int AnomalyDetector::expectedFeatureCount() const
+{
+#if HAS_ONNXRUNTIME
+    if (m_impl && m_impl->loaded)
+        return m_impl->featureCount;
+#endif
+    return 0;
+}
+
 // ============================================================================
 // score  –  run inference on a feature vector
 // ============================================================================
@@ -142,12 +165,13 @@ float AnomalyDetector::score(const std::vector<float>& features) const
     if (!m_impl->loaded || !m_impl->session)
         return -1.0f;
 
-    if (static_cast<int>(features.size()) != kFeatureCount)
+    const int expectedCount = m_impl->featureCount;
+    if (static_cast<int>(features.size()) != expectedCount)
         return -1.0f;
 
     try {
         // Create input tensor
-        std::array<int64_t, 2> inputShape = { 1, kFeatureCount };
+        std::array<int64_t, 2> inputShape = { 1, static_cast<int64_t>(expectedCount) };
         auto memInfo = Ort::MemoryInfo::CreateCpu(
             OrtArenaAllocator, OrtMemTypeDefault);
 

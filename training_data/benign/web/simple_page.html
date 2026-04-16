@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Odysseus AI Dashboard</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #1A237E; }
+        .stat { font-size: 2em; font-weight: bold; color: #4CAF50; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #E8EAF6; color: #1A237E; }
+    </style>
+</head>
+<body>
+    <h1>Security Dashboard</h1>
+    <div class="card">
+        <h2>Scan Statistics</h2>
+        <p>Total files scanned: <span class="stat">1,234</span></p>
+        <p>Clean files: <span class="stat" style="color:#4CAF50;">1,230</span></p>
+        <p>Suspicious: <span class="stat" style="color:#FF9800;">4</span></p>
+    </div>
+    <div class="card">
+        <h2>Recent Scans</h2>
+        <table>
+            <tr><th>Date</th><th>Files</th><th>Status</th></tr>
+            <tr><td>2026-04-14</td><td>450</td><td>Complete</td></tr>
+            <tr><td>2026-04-13</td><td>784</td><td>Complete</td></tr>
+        </table>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Dashboard loaded');
+            const stats = document.querySelectorAll('.stat');
+            stats.forEach(function(el) {
+                el.style.transition = 'color 0.3s';
+            });
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="helmet-clip">
+      <path d="M256 40 C160 40 80 130 80 240 C80 310 100 360 130 400 L130 440 C130 460 150 472 160 472 L180 472 L180 380 C180 360 200 340 220 340 L240 340 L240 472 L272 472 L272 340 L292 340 C312 340 332 360 332 380 L332 472 L352 472 C362 472 382 460 382 440 L382 400 C412 360 432 310 432 240 C432 130 352 40 256 40Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Main helmet shape - dark navy -->
+  <path d="M256 30 C150 30 70 125 70 240 C70 315 92 368 125 410 L125 445 C125 468 148 480 165 480 L185 480 L185 375 C185 352 208 332 228 332 L245 332 L245 480 L267 480 L267 332 L284 332 C304 332 327 352 327 375 L327 480 L347 480 C364 480 387 468 387 445 L387 410 C420 368 442 315 442 240 C442 125 362 30 256 30Z"
+        fill="#1B2A4A" stroke="none"/>
+
+  <!-- Crest/plume -->
+  <path d="M256 30 C256 30 230 25 210 35 C190 45 180 55 175 70 C185 50 210 40 256 35 C302 40 327 50 337 70 C332 55 322 45 302 35 C282 25 256 30 256 30Z"
+        fill="#1B2A4A"/>
+  <path d="M175 70 C168 90 165 115 165 140 C165 140 180 85 256 75 C332 85 347 140 347 140 C347 115 344 90 337 70 C327 50 302 40 256 35 C210 40 185 50 175 70Z"
+        fill="#1B2A4A"/>
+
+  <!-- Helmet top crest fins -->
+  <path d="M200 65 C195 50 200 30 215 15 C220 25 218 45 220 60Z" fill="#1B2A4A"/>
+  <path d="M220 55 C218 38 225 18 240 5 C243 18 240 38 240 52Z" fill="#1B2A4A"/>
+  <path d="M240 50 C240 32 248 12 256 0 C264 12 272 32 272 50Z" fill="#1B2A4A"/>
+  <path d="M272 52 C272 38 269 18 272 5 C287 18 294 38 292 55Z" fill="#1B2A4A"/>
+  <path d="M292 60 C294 45 292 25 297 15 C312 30 317 50 312 65Z" fill="#1B2A4A"/>
+
+  <!-- Eye opening -->
+  <ellipse cx="256" cy="220" rx="95" ry="55" fill="none" stroke="#1B2A4A" stroke-width="0"/>
+  <path d="M170 210 C190 175 220 160 256 160 C292 160 322 175 342 210 C342 210 330 190 310 180 C290 170 270 168 256 168 C242 168 222 170 202 180 C182 190 170 210 170 210Z"
+        fill="#F8F9FA"/>
+  <path d="M170 210 C190 248 220 262 256 262 C292 262 322 248 342 210"
+        fill="none" stroke="#F8F9FA" stroke-width="8"/>
+  <path d="M170 210 Q256 290 342 210 Q256 270 170 210Z" fill="#F8F9FA"/>
+
+  <!-- Circuit trace - main vertical line -->
+  <line x1="256" y1="280" x2="256" y2="400" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Circuit trace - branch left -->
+  <polyline points="256,310 220,310 220,350 200,350" fill="none" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Circuit trace - branch right -->
+  <polyline points="256,340 300,340 300,380" fill="none" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Circuit trace - small branch -->
+  <polyline points="220,330 190,330" fill="none" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Circuit nodes (dots at endpoints/junctions) -->
+  <circle cx="256" cy="310" r="5" fill="#8BA4C7"/>
+  <circle cx="220" cy="310" r="4" fill="#8BA4C7"/>
+  <circle cx="200" cy="350" r="5" fill="#8BA4C7"/>
+  <circle cx="256" cy="340" r="5" fill="#8BA4C7"/>
+  <circle cx="300" cy="380" r="5" fill="#8BA4C7"/>
+  <circle cx="190" cy="330" r="4" fill="#8BA4C7"/>
+  <circle cx="256" cy="400" r="5" fill="#8BA4C7"/>
+
+  <!-- Circuit trace through eye area -->
+  <polyline points="200,215 230,215 245,200 275,200 290,215 320,215" fill="none" stroke="#8BA4C7" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="245" cy="200" r="3.5" fill="#8BA4C7"/>
+  <circle cx="275" cy="200" r="3.5" fill="#8BA4C7"/>
+
+  <!-- X mark on cheek area (matching the original logo) -->
+  <line x1="280" y1="290" x2="295" y2="305" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round"/>
+  <line x1="295" y1="290" x2="280" y2="305" stroke="#8BA4C7" stroke-width="3" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,72 @@
+/* Odysseus AI - Main Stylesheet */
+:root {
+    --primary: #1A237E;
+    --accent: #5C6BC0;
+    --success: #4CAF50;
+    --warning: #FF9800;
+    --danger: #C62828;
+    --bg: #FAFAFA;
+    --card-bg: #FFFFFF;
+    --text: #333333;
+    --border: #E0E0E0;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+    background-color: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+}
+
+.container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+
+.header {
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    color: white;
+    padding: 20px 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+.card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 16px 0;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    border: 1px solid var(--border);
+    transition: box-shadow 0.2s ease;
+}
+
+.card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+
+.badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    font-weight: 600;
+}
+
+.badge-critical { background: #FDECEA; color: var(--danger); }
+.badge-warning  { background: #FFF3E0; color: var(--warning); }
+.badge-safe     { background: #E8F5E9; color: var(--success); }
+
+.progress-bar {
+    height: 10px;
+    background: var(--border);
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.5s ease;
+}
+
+@media (max-width: 768px) {
+    .container { padding: 0 12px; }
+    .card { padding: 16px; }
+}

