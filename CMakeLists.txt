@@ -8,7 +8,40 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network Charts)
+# ============================================================================
+#  Build dependencies — supported platforms: macOS (Apple Silicon), Linux
+#  (Debian/Ubuntu/Fedora/Arch). Windows builds are not supported in this
+#  pass; CMake will not stop you from running on Windows but several
+#  required libraries (Qt6Charts, YARA, etc.) need separate Windows
+#  installation steps that are not documented here.
+#
+#  REQUIRED:
+#    • Qt6  (Widgets + Network + Charts)
+#
+#  OPTIONAL (graceful fallback if missing):
+#    • ONNX Runtime — AI anomaly detection
+#    • LightGBM     — native EMBER PE detection (~96.5% accuracy)
+#    • libyara      — YARA rule scanning (Phase 1)
+# ============================================================================
+
+find_package(Qt6 QUIET COMPONENTS Widgets Network Charts)
+if(NOT Qt6_FOUND)
+    message(FATAL_ERROR
+        "Qt6 (Widgets + Network + Charts) is REQUIRED but was not found.\n"
+        "  • macOS  : brew install qt\n"
+        "  • Debian : sudo apt install qt6-base-dev qt6-charts-dev\n"
+        "  • Fedora : sudo dnf install qt6-qtbase-devel qt6-qtcharts-devel\n"
+        "  • Arch   : sudo pacman -S qt6-base qt6-charts\n"
+        "If Qt6 is installed in a non-standard location, point CMake at it:\n"
+        "  cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/qt6/lib/cmake")
+endif()
+if(NOT TARGET Qt6::Charts)
+    message(FATAL_ERROR
+        "Qt6::Charts component is missing. Install it with:\n"
+        "  • macOS  : brew install qt          (Charts is bundled)\n"
+        "  • Debian : sudo apt install qt6-charts-dev\n"
+        "  • Fedora : sudo dnf install qt6-qtcharts-devel")
+endif()
 
 # Copy the malware hash database AND YARA rules next to the executable at build time.
 # The data/ tree contains: malware_hashes.txt, yara_rules/, anomaly_model_*.onnx, etc.
@@ -106,8 +139,11 @@ else()
         endif()
     endif()
     if(NOT ONNXRT_FOUND)
-        message(STATUS "ONNX Runtime NOT found – AI anomaly detection will be disabled "
-                       "(hash-only mode). Install onnxruntime to enable.")
+        message(STATUS "ONNX Runtime NOT found – AI anomaly detection will be DISABLED "
+                       "(hash-only mode). To enable:")
+        message(STATUS "  • macOS  : brew install onnxruntime")
+        message(STATUS "  • Debian : sudo apt install libonnxruntime-dev   (or build from source)")
+        message(STATUS "  • Other  : grab a prebuilt binary from https://github.com/microsoft/onnxruntime/releases")
     endif()
 endif()
 
@@ -119,12 +155,22 @@ endif()
 find_package(PkgConfig QUIET)
 set(LIGHTGBM_FOUND FALSE)
 
-# Try finding the library directly (Homebrew installs to /opt/homebrew)
+# Search common install locations on macOS (Homebrew x86_64 + Apple Silicon)
+# and Linux (Debian / Fedora / Arch usual paths).
 find_library(LIGHTGBM_LIBRARY NAMES _lightgbm lib_lightgbm lightgbm
-    HINTS /opt/homebrew/lib /usr/local/lib /usr/lib
+    HINTS
+        /opt/homebrew/lib                 # Apple Silicon Homebrew
+        /usr/local/lib                    # Intel Homebrew + manual builds
+        /usr/lib                          # Linux distro packages
+        /usr/lib/x86_64-linux-gnu         # Debian/Ubuntu multiarch
+        /usr/lib/aarch64-linux-gnu        # Debian/Ubuntu ARM
+        /usr/lib64                        # Fedora / RHEL 64-bit
 )
 find_path(LIGHTGBM_INCLUDE NAMES lightgbm/c_api.h
-    HINTS /opt/homebrew/include /usr/local/include /usr/include
+    HINTS
+        /opt/homebrew/include
+        /usr/local/include
+        /usr/include
 )
 
 if(LIGHTGBM_LIBRARY AND LIGHTGBM_INCLUDE)
@@ -135,8 +181,10 @@ if(LIGHTGBM_LIBRARY AND LIGHTGBM_INCLUDE)
     message(STATUS "  Library: ${LIGHTGBM_LIBRARY}")
     message(STATUS "  Include: ${LIGHTGBM_INCLUDE}")
 else()
-    message(STATUS "LightGBM NOT found – will fall back to ONNX-based EMBER detection (~86.5%). "
-                   "Install with: brew install lightgbm")
+    message(STATUS "LightGBM NOT found – falling back to ONNX-based EMBER detection (~86.5%). To enable:")
+    message(STATUS "  • macOS  : brew install lightgbm")
+    message(STATUS "  • Debian : sudo apt install liblightgbm-dev   (or build from source)")
+    message(STATUS "  • Fedora : sudo dnf install lightgbm-devel")
 endif()
 
 # -----------------------------

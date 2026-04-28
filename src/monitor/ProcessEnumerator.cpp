@@ -1,9 +1,15 @@
 // ============================================================================
 // ProcessEnumerator.cpp  –  macOS sysctl + Linux /proc process listing
 //
-// Implementation pattern matches CodeSigning.cpp / FileScannerContext.cpp:
-// platform-specific code is gated by Q_OS_* macros, with a polite stub for
-// any other OS so the build never breaks.
+// Structure (cross-platform stabilization pass):
+//   • ONE `namespace ProcessEnumerator { ... }` wraps the whole file.
+//   • Platform-specific includes are at file scope, guarded by Q_OS_*
+//     so non-Unix builds (Windows) don't try to pull pwd.h / unistd.h.
+//   • Each public function (`list`, `resolveUser`) is defined exactly
+//     once; the body switches on the platform with `#if/#elif/#else`
+//     INSIDE the function — never around the namespace itself. This is
+//     what fixes the previous bug where the file had unbalanced
+//     namespace braces on Linux.
 //
 // macOS notes (Apple Silicon M4 verified):
 //   • sysctl(KERN_PROC_ALL) returns an array of `kinfo_proc`. Field layout
@@ -11,16 +17,16 @@
 //   • proc_pidpath() lives in <libproc.h>; statically linked into libSystem,
 //     no separate library required.
 //   • KERN_PROCARGS2 returns a packed buffer: [argc:i32][exec_path][padding]
-//     [argv0\0argv1\0...][envp...]. Bouncing through this buffer is the only
-//     way to get the full argv on macOS without a kernel ext.
+//     [argv0\0argv1\0...][envp...]. Bouncing through this buffer is the
+//     only way to get the full argv on macOS without a kernel ext.
 //   • EPERM on KERN_PROCARGS2 is NORMAL for processes belonging to other
 //     users / sandboxed apps without Full Disk Access. We mark cmdLine as
 //     "(restricted)" and bump restrictedCount instead of erroring out.
 //
-// Linux notes:
+// Linux notes (verified Ubuntu 22.04 / Debian 12):
 //   • /proc is the source of truth. /proc/<pid>/exe is a symlink — readlink
 //     it; if the target ends in " (deleted)" the binary has been unlinked
-//     while the process kept running (a classic dropper/in-memory pattern).
+//     while the process kept running (a classic dropper / in-memory pattern).
 //   • /proc/<pid>/cmdline is null-separated; we replace \0 with space.
 //   • Some pids are inaccessible (EACCES) without root. We skip those rather
 //     than failing the whole listing.
@@ -35,52 +41,63 @@
 #include <QDebug>
 #include <QtGlobal>
 
-// Platform-specific syscalls. Pulling these in at the top of the TU (rather
-// than inside the namespace) keeps the C/POSIX headers in their natural
-// global scope — they don't play well with being parsed inside a C++
-// namespace.
-#include <pwd.h>
-#include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <vector>
 
+// ── POSIX headers (macOS + Linux) ──────────────────────────────────────────
+// Wrapped so a future Windows build can compile cleanly with a different
+// resolveUser() / pid-listing strategy.
+#if defined(Q_OS_MACOS) || defined(Q_OS_LINUX) || defined(Q_OS_UNIX)
+#  include <pwd.h>
+#  include <unistd.h>
+#  include <sys/types.h>
+#endif
+
+// ── macOS-only headers ─────────────────────────────────────────────────────
 #if defined(Q_OS_MACOS)
 #  include <sys/sysctl.h>
 #  include <libproc.h>
 #  include <sys/proc_info.h>
 #endif
 
+// ============================================================================
+// Single namespace block — everything below lives inside ProcessEnumerator.
+// ============================================================================
 namespace ProcessEnumerator {
 
 // ----------------------------------------------------------------------------
-// resolveUser  –  cross-platform; uses getpwuid_r where available
+// resolveUser  –  cross-platform; uses getpwuid_r where available.
 // ----------------------------------------------------------------------------
 QString resolveUser(int uid)
 {
     if (uid < 0) return QStringLiteral("uid:?");
 
-    char buf[2048];
+#if defined(Q_OS_MACOS) || defined(Q_OS_LINUX) || defined(Q_OS_UNIX)
+    char           buf[2048];
     struct passwd  pwd;
     struct passwd* result = nullptr;
-
     const int rc = ::getpwuid_r(static_cast<uid_t>(uid),
                                  &pwd, buf, sizeof(buf), &result);
     if (rc == 0 && result && result->pw_name)
         return QString::fromUtf8(result->pw_name);
     return QString("uid:%1").arg(uid);
+#else
+    // Windows / other: no POSIX passwd database. Fall back to numeric uid.
+    return QString("uid:%1").arg(uid);
+#endif
 }
 
 // ============================================================================
-// macOS implementation
+// macOS: helper to read /argv via KERN_PROCARGS2
+// (Defined here so list() below can call it from inside the same #if block.)
 // ============================================================================
 #if defined(Q_OS_MACOS)
 
-// Read the full argv of a single PID via KERN_PROCARGS2.
 // Returns:
 //   1  → ok, cmdLine populated
 //   0  → no args (kernel threads, very early init)
-//  -1  → EPERM / access denied (caller should mark "(restricted)" and continue)
+//  -1  → EPERM / access denied (caller marks "(restricted)" and continues)
 static int readCmdLine(int pid, QString& outExePath, QString& outCmdLine)
 {
     int    argMax = 0;
@@ -96,7 +113,7 @@ static int readCmdLine(int pid, QString& outExePath, QString& outCmdLine)
     int    mib[3] = { CTL_KERN, KERN_PROCARGS2, pid };
     size_t bufLen = buf.size();
     if (::sysctl(mib, 3, buf.data(), &bufLen, nullptr, 0) != 0) {
-        return (errno == EINVAL || errno == EPERM || errno == ESRCH) ? -1 : -1;
+        return -1;   // EINVAL / EPERM / ESRCH — all map to "skip this pid"
     }
     if (bufLen < sizeof(int)) return 0;
 
@@ -118,17 +135,72 @@ static int readCmdLine(int pid, QString& outExePath, QString& outCmdLine)
         const QString a = QString::fromUtf8(p);
         args.append(a);
         p += a.toUtf8().size();
-        // advance past the \0 terminator
-        while (p < end && *p == '\0') ++p;
+        while (p < end && *p == '\0') ++p;   // advance past terminator
     }
     outCmdLine = args.join(' ');
     return 1;
 }
 
+#endif   // Q_OS_MACOS — readCmdLine
+
+// ============================================================================
+// Linux: helper to slurp small /proc files
+// ============================================================================
+#if defined(Q_OS_LINUX)
+
+static QString readSmallFile(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    const QByteArray data = f.readAll();
+    f.close();
+    return QString::fromUtf8(data);
+}
+
+static int parseUidFromStatus(const QString& statusText)
+{
+    // /proc/<pid>/status line:  "Uid:\t<real>\t<eff>\t<saved>\t<fs>"
+    for (const QString& line : statusText.split('\n')) {
+        if (!line.startsWith("Uid:")) continue;
+        const QStringList parts = line.split(QRegularExpression("\\s+"),
+                                              Qt::SkipEmptyParts);
+        if (parts.size() >= 2) {
+            bool ok = false;
+            const int uid = parts[1].toInt(&ok);
+            if (ok) return uid;
+        }
+        break;
+    }
+    return -1;
+}
+
+static int parsePpidFromStatus(const QString& statusText)
+{
+    for (const QString& line : statusText.split('\n')) {
+        if (!line.startsWith("PPid:")) continue;
+        const QStringList parts = line.split(QRegularExpression("\\s+"),
+                                              Qt::SkipEmptyParts);
+        if (parts.size() >= 2) {
+            bool ok = false;
+            const int ppid = parts[1].toInt(&ok);
+            if (ok) return ppid;
+        }
+        break;
+    }
+    return 0;
+}
+
+#endif   // Q_OS_LINUX — /proc helpers
+
+// ============================================================================
+// list  –  one definition; body switches on the platform.
+// ============================================================================
 bool list(QVector<ProcessInfo>& out, int& restrictedCount)
 {
     restrictedCount = 0;
 
+#if defined(Q_OS_MACOS)
+    // ── macOS path: sysctl(KERN_PROC_ALL) + libproc ────────────────────
     int    mib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_ALL };
     size_t sz     = 0;
 
@@ -179,70 +251,15 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
             info.exePath = exePathFromArgs;
         }
 
-        // Did the executable get unlinked while running?
         if (!info.exePath.isEmpty() && !QFile::exists(info.exePath))
             info.exeMissing = true;
 
         out.append(std::move(info));
     }
     return true;
-}
 
-}  // namespace ProcessEnumerator
-
-// ============================================================================
-// Linux implementation
-// ============================================================================
 #elif defined(Q_OS_LINUX)
-
-namespace ProcessEnumerator {
-
-static QString readSmallFile(const QString& path)
-{
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly)) return {};
-    const QByteArray data = f.readAll();
-    f.close();
-    return QString::fromUtf8(data);
-}
-
-static int parseUidFromStatus(const QString& statusText)
-{
-    // /proc/<pid>/status line:  "Uid:\t<real>\t<eff>\t<saved>\t<fs>"
-    for (const QString& line : statusText.split('\n')) {
-        if (!line.startsWith("Uid:")) continue;
-        const QStringList parts = line.split(QRegularExpression("\\s+"),
-                                              Qt::SkipEmptyParts);
-        if (parts.size() >= 2) {
-            bool ok = false;
-            const int uid = parts[1].toInt(&ok);
-            if (ok) return uid;
-        }
-        break;
-    }
-    return -1;
-}
-
-static int parsePpidFromStatus(const QString& statusText)
-{
-    for (const QString& line : statusText.split('\n')) {
-        if (!line.startsWith("PPid:")) continue;
-        const QStringList parts = line.split(QRegularExpression("\\s+"),
-                                              Qt::SkipEmptyParts);
-        if (parts.size() >= 2) {
-            bool ok = false;
-            const int ppid = parts[1].toInt(&ok);
-            if (ok) return ppid;
-        }
-        break;
-    }
-    return 0;
-}
-
-bool list(QVector<ProcessInfo>& out, int& restrictedCount)
-{
-    restrictedCount = 0;
-
+    // ── Linux path: /proc walking ──────────────────────────────────────
     QDir proc("/proc");
     if (!proc.exists()) {
         qWarning() << "[SysMon] /proc not present — cannot enumerate processes";
@@ -264,20 +281,20 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
         info.pid          = pid;
         info.isOurProcess = (pid == selfPid);
 
-        // /proc/<pid>/comm – short name (kernel-truncated to 16 chars)
+        // /proc/<pid>/comm — short name (kernel-truncated to 16 chars)
         info.name = readSmallFile(base + "/comm").trimmed();
         if (info.name.isEmpty()) {
             // Process vanished between readdir and open — skip silently.
             continue;
         }
 
-        // /proc/<pid>/status – Uid + PPid
+        // /proc/<pid>/status — Uid + PPid
         const QString status = readSmallFile(base + "/status");
         info.uid  = parseUidFromStatus(status);
         info.ppid = parsePpidFromStatus(status);
         info.user = resolveUser(info.uid);
 
-        // /proc/<pid>/exe – symlink to executable; may end in " (deleted)"
+        // /proc/<pid>/exe — symlink to executable; may end in " (deleted)"
         char linkBuf[4096] = {0};
         const ssize_t got = ::readlink(QFile::encodeName(base + "/exe").constData(),
                                         linkBuf, sizeof(linkBuf) - 1);
@@ -294,7 +311,7 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
             ++restrictedCount;
         }
 
-        // /proc/<pid>/cmdline – null-separated argv
+        // /proc/<pid>/cmdline — null-separated argv
         QFile cmdF(base + "/cmdline");
         if (cmdF.open(QIODevice::ReadOnly)) {
             QByteArray raw = cmdF.readAll();
@@ -303,7 +320,7 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
             info.cmdLine = QString::fromUtf8(raw).trimmed();
         }
         if (info.cmdLine.isEmpty() && info.exePath.isEmpty()) {
-            // Couldn't read either — kernel thread or restricted.
+            // Kernel thread or restricted.
             info.cmdLine = QStringLiteral("(restricted)");
             ++restrictedCount;
         }
@@ -311,24 +328,13 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
         out.append(std::move(info));
     }
     return true;
-}
 
-}  // namespace ProcessEnumerator
-
-// ============================================================================
-// Stub for unsupported platforms
-// ============================================================================
 #else
-
-namespace ProcessEnumerator {
-
-bool list(QVector<ProcessInfo>& /*out*/, int& restrictedCount)
-{
-    restrictedCount = 0;
+    // ── Unsupported platform ───────────────────────────────────────────
+    Q_UNUSED(out)
     qInfo() << "[SysMon] process enumeration not implemented on this platform";
     return false;
+#endif
 }
 
-}  // namespace ProcessEnumerator
-
-#endif
+}  // namespace ProcessEnumerator   ← single close, after #endif of any platform block

@@ -342,10 +342,18 @@ static void scanCronLinux(QVector<PersistenceItem>& out)
         }
     }
 
-    // Current user crontab
+    // Current user crontab. crontab is part of cron / cronie / dcron — most
+    // distros ship one of those. If the binary isn't installed we just log
+    // and move on; the system-wide /etc/crontab + /etc/cron.d enumeration
+    // above still works.
     QProcess p;
     p.start("crontab", { "-l" });
-    if (p.waitForStarted(1500) && p.waitForFinished(5000) && p.exitCode() == 0) {
+    if (!p.waitForStarted(1500)) {
+        qInfo() << "[SysMon] crontab binary not available on this system — "
+                   "skipping per-user cron enumeration";
+        return;
+    }
+    if (p.waitForFinished(5000) && p.exitCode() == 0) {
         const QString text = QString::fromUtf8(p.readAllStandardOutput());
         int n = 0;
         for (const QString& line : text.split('\n')) {
