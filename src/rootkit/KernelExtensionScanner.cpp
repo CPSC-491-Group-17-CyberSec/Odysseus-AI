@@ -278,7 +278,20 @@ bool list(QVector<KernelExtension>& out, int& totalsOut)
 }
 
 // ============================================================================
-// Stub
+// Windows stub (kernel driver enumeration deferred)
+// ============================================================================
+#elif defined(Q_OS_WIN)
+
+bool list(QVector<KernelExtension>& /*out*/, int& totalsOut)
+{
+    totalsOut = 0;
+    qInfo() << "[Rootkit] Windows kernel driver inspection not implemented yet — "
+               "(planned: EnumDeviceDrivers / Service Control Manager filter).";
+    return false;
+}
+
+// ============================================================================
+// Other-platform stub
 // ============================================================================
 #else
 

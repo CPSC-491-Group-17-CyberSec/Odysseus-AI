@@ -8,6 +8,8 @@
 #include "../theme/DashboardTheme.h"
 #include "../pages/DashboardPage.h"
 #include "../pages/SettingsPage.h"
+#include "../pages/ResultsPage.h"
+#include "../pages/ScanPage.h"
 #include "ai/LLMExplainer.h"
 #include "ai/FeatureExtractor.h"
 #include "monitor/SystemMonitor.h"
@@ -248,18 +250,30 @@ void MainWindow::setupShell()
     connect(m_dashboardPage, &DashboardPage::viewAllActivityClicked,
             this, &MainWindow::onDashboardViewAllActivity);
 
-    // Pages 1 — Scan: placeholder (Step 5 will host scan flow here).
-    m_pageStack->insertWidget(PageScan,
-        makePlaceholderPage("Scan",
-            "Scan setup lives on the Dashboard for now.\n"
-            "A dedicated scan-history view lands in Step 5."));
+    // Page 1 — SCAN: redesigned ScanPage matching the mockup.
+    // legacyCentral is parked as a HIDDEN child of MainWindow so the
+    // pre-existing showPanel() flow doesn't crash; users no longer see
+    // those legacy panels — scan progress lands on Results live.
+    legacyCentral->setParent(this);
+    legacyCentral->setVisible(false);
 
-    // Page 2 — RESULTS: the legacy "everything" view lives here unchanged.
-    // The threat table, scan-results panel, history panel, and existing
-    // detail panels keep working — they're just reachable via the Results
-    // sidebar item instead of being the primary view.
-    legacyCentral->setParent(nullptr);
-    m_pageStack->insertWidget(PageResults, legacyCentral);
+    m_scanPage = new ScanPage();
+    m_pageStack->insertWidget(PageScan, m_scanPage);
+    connect(m_scanPage, &ScanPage::scanRequested,
+            this, &MainWindow::onScanPageStartRequested);
+    connect(m_scanPage, &ScanPage::exportLogsRequested,
+            this, &MainWindow::onScanPageExportLogs);
+    connect(m_scanPage, &ScanPage::viewAllRecentRequested,
+            this, &MainWindow::onScanPageViewAllRecent);
+
+    // Page 2 — RESULTS: refactored ResultsPage (strict-palette layout).
+    m_resultsPage = new ResultsPage();
+    m_pageStack->insertWidget(PageResults, m_resultsPage);
+    connect(m_resultsPage, &ResultsPage::exportRequested,
+            this, [](){
+                qInfo() << "[Results] export requested — feature not yet "
+                            "implemented (placeholder)";
+            });
 
     // Page 3 — SYSTEM STATUS: reparent the existing SystemStatusPanel
     // (built way back in Phase 2) to be its own page. It used to live
@@ -334,8 +348,29 @@ void MainWindow::setupShell()
     retireLegacyHeader();
 
     // Initial paint: pull whatever data is already loaded (history from DB,
-    // any in-flight findings) into the new dashboard cards.
+    // any in-flight findings) into the new dashboard cards + ResultsPage
+    // + ScanPage.
     refreshDashboard();
+    if (m_resultsPage) {
+        QVector<SuspiciousFile> initial;
+        if (!m_history.isEmpty())
+            initial = m_history.first().findings;
+        m_resultsPage->setFindings(initial);
+    }
+    if (m_scanPage) {
+        if (!m_history.isEmpty()) {
+            const ScanRecord& latest = m_history.first();
+            const int totalThreats = latest.criticalCount
+                                   + latest.suspiciousOnly
+                                   + latest.reviewCount;
+            m_scanPage->setStats(latest.timestamp,
+                                  latest.totalScanned,
+                                  totalThreats,
+                                  totalThreats == 0,
+                                  /*scanning=*/false);
+        }
+        m_scanPage->setRecentScans(m_history);
+    }
 }
 
 // ============================================================================
@@ -660,6 +695,44 @@ void MainWindow::onDashboardViewAllActivity()
         m_pageStack->setCurrentIndex(PageResults);
     if (m_sidebar)
         m_sidebar->setActive(PageResults);
+}
+
+// ============================================================================
+//  ScanPage signal handlers
+// ============================================================================
+void MainWindow::onScanPageStartRequested(const QStringList& targets,
+                                            int /*depth*/)
+{
+    // The Quick / Standard / Deep depth selector is a UX hint for now —
+    // the underlying FileScanner doesn't differentiate. We map:
+    //   • no targets       → full system scan from the user's home dir
+    //   • single target    → onPartialScanRequested(path)
+    //   • multiple targets → first one (FileScanner handles one root at a
+    //                         time; sequential scanning is future work)
+    if (targets.isEmpty()) {
+        onFullScanRequested();
+        return;
+    }
+    onPartialScanRequested(targets.first());
+    if (targets.size() > 1) {
+        qInfo().noquote()
+            << QString("[Scan] %1 targets selected — only the first ('%2') "
+                       "will be scanned in this run; sequential scan support "
+                       "is future work.")
+                  .arg(targets.size()).arg(targets.first());
+    }
+}
+
+void MainWindow::onScanPageExportLogs()
+{
+    qInfo() << "[Scan] Export Scan Logs requested — not yet implemented "
+               "(planned: write CSV/JSON report from m_history).";
+}
+
+void MainWindow::onScanPageViewAllRecent()
+{
+    if (m_pageStack) m_pageStack->setCurrentIndex(PageResults);
+    if (m_sidebar)   m_sidebar->setActive(PageResults);
 }
 
 void MainWindow::onThreatDetailCloseRequested()
@@ -2027,6 +2100,17 @@ void MainWindow::startScanForPath(const QString& rootPath)
     m_driveTotalBytes   = 0;
     m_scanActive        = true;
 
+    // Phase 4 refactor: clear stale state from prior scan, mark the
+    // ScanPage's Start button as "Scan in progress…", and navigate to
+    // Results so the user can watch findings stream in (matches the
+    // brief: Scan tab is for setup; results live on Results).
+    if (m_resultsPage) m_resultsPage->clear();
+    if (m_dashboardPage) refreshDashboard();
+    if (m_scanPage) m_scanPage->setStats(QDateTime{}, 0, 0, true,
+                                           /*scanning=*/true);
+    if (m_pageStack)   m_pageStack->setCurrentIndex(PageResults);
+    if (m_sidebar)     m_sidebar->setActive(PageResults);
+
     scanResultsList->clear();
     scanSummaryLabel->setText("Scanning...");
     scanStatusLabel->setText("Scanning in progress...");
@@ -2133,6 +2217,7 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
 {
     m_findings.append(file);
     refreshDashboard();   // live-update the new dashboard cards
+    if (m_resultsPage) m_resultsPage->appendFinding(file);   // refactor: feed the new ResultsPage
 
     // Use classification-aware log label instead of always "[SUSPICIOUS]"
     QString logLabel = "[FLAGGED]";
@@ -2455,6 +2540,25 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     // Phase 4: refresh the new dashboard cards now that history has the
     // completed ScanRecord with totalScanned + per-category counts.
     refreshDashboard();
+
+    // Push the finalized finding set into the refactored ResultsPage so
+    // its KPI strip shows the post-scan totals + average score.
+    if (m_resultsPage)
+        m_resultsPage->setFindings(m_findings);
+
+    // Update the new ScanPage's KPI strip + Recent Scans list.
+    if (m_scanPage) {
+        const ScanRecord& latest = m_history.first();
+        const int totalThreats   = latest.criticalCount
+                                 + latest.suspiciousOnly
+                                 + latest.reviewCount;
+        m_scanPage->setStats(latest.timestamp,
+                              latest.totalScanned,
+                              totalThreats,
+                              totalThreats == 0,
+                              /*scanning=*/false);
+        m_scanPage->setRecentScans(m_history);
+    }
 }
 
 void MainWindow::onScanError(const QString& message)

@@ -24,29 +24,35 @@ class QApplication;
 namespace Theme {
 
 // ── Color palette (hex strings, used directly in stylesheets) ──────────────
+//   Strict enterprise-cybersecurity palette. Every UI surface must pick
+//   from this set; ad-hoc colors are not allowed elsewhere in the codebase.
 namespace Color {
-    inline constexpr const char* bgPrimary     = "#0F1424";
-    inline constexpr const char* bgSecondary   = "#1A2138";
-    inline constexpr const char* bgSidebar     = "#161B2C";
-    inline constexpr const char* bgCard        = "#1E2640";
-    inline constexpr const char* bgCardHover   = "#252E50";
-    inline constexpr const char* borderSubtle  = "#2A3354";
+    // Surfaces
+    inline constexpr const char* bgPrimary     = "#0B1220";   // app background
+    inline constexpr const char* bgSecondary   = "#111827";   // alt cards / row stripes
+    inline constexpr const char* bgSidebar     = "#0F1729";   // sidebar column (a touch darker)
+    inline constexpr const char* bgCard        = "#111827";   // standard card
+    inline constexpr const char* bgCardHover   = "#1A2436";   // hover row tint
+    inline constexpr const char* borderSubtle  = "#1F2937";   // 1px dividers
     inline constexpr const char* borderAccent  = "#3B82F6";
 
-    inline constexpr const char* textPrimary   = "#F8FAFC";
-    inline constexpr const char* textSecondary = "#94A3B8";
-    inline constexpr const char* textMuted     = "#64748B";
+    // Text
+    inline constexpr const char* textPrimary   = "#E5E7EB";   // body text
+    inline constexpr const char* textSecondary = "#9CA3AF";   // labels, captions
+    inline constexpr const char* textMuted     = "#6B7280";   // muted metadata
 
+    // Accent
     inline constexpr const char* accentBlue       = "#3B82F6";
     inline constexpr const char* accentBlueHover  = "#2563EB";
-    inline constexpr const char* accentBlueSoft   = "#1E40AF";   // 20% bg use
+    inline constexpr const char* accentBlueSoft   = "#1E3A8A";   // selection bg
 
-    inline constexpr const char* severityCritical = "#EF4444";
-    inline constexpr const char* severityHigh     = "#F97316";
-    inline constexpr const char* severityMedium   = "#F59E0B";
-    inline constexpr const char* severityLow      = "#FACC15";
-    inline constexpr const char* severitySafe     = "#22C55E";
-    inline constexpr const char* severityInfo     = "#3B82F6";
+    // Severities (single source of truth)
+    inline constexpr const char* severityCritical = "#EF4444";   // red
+    inline constexpr const char* severityHigh     = "#F59E0B";   // amber  (alias of medium)
+    inline constexpr const char* severityMedium   = "#F59E0B";   // amber
+    inline constexpr const char* severityLow      = "#F59E0B";   // amber  (alias)
+    inline constexpr const char* severitySafe     = "#10B981";   // green  (clean)
+    inline constexpr const char* severityInfo     = "#3B82F6";   // accent blue
 }  // namespace Color
 
 // ── Sizes ──────────────────────────────────────────────────────────────────

@@ -72,6 +72,13 @@ add_executable(main
     # Phase 4 – Step 4: settings page + toggle widgets
     src/ui/widgets/ToggleRow.cpp
     src/ui/pages/SettingsPage.cpp
+    # Phase 4 – Refactor: ResultsPage + reusable components
+    src/ui/widgets/ThreatRow.cpp
+    src/ui/widgets/DetailSection.cpp
+    src/ui/pages/ResultsPage.cpp
+    # Phase 4 – Scan page redesign
+    src/ui/widgets/DropArea.cpp
+    src/ui/pages/ScanPage.cpp
     # Scanner engine – FileScanner.cpp is the AUTOMOC anchor (includes the header
     # so CMake generates moc_FileScanner.cpp). All implementations are in the
     # focused TUs below, compiled with per-file optimization flags.
@@ -117,6 +124,14 @@ target_include_directories(main PRIVATE
 )
 
 target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network Qt6::Charts)
+
+# ── Windows platform libraries ───────────────────────────────────────────────
+# advapi32 — registry (RegOpenKeyEx etc.; pulled by QSettings::NativeFormat too)
+# psapi    — process-image queries used by ProcessEnumerator's Windows branch
+# version  — file-version info for future Authenticode / publisher checks
+if(WIN32)
+    target_link_libraries(main PRIVATE advapi32 psapi version)
+endif()
 
 # -----------------------------
 # ONNX Runtime (optional – AI anomaly detection)

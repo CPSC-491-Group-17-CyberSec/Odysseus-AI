@@ -34,6 +34,8 @@ class Sidebar;
 class QStackedWidget;
 class DashboardPage;
 class ThreatDetailPanel;
+class ResultsPage;
+class ScanPage;
 
 class MainWindow : public QMainWindow
 {
@@ -246,9 +248,11 @@ private:
     };
     Sidebar*            m_sidebar         = nullptr;
     QStackedWidget*     m_pageStack       = nullptr;
-    QWidget*            m_legacyDashWrap  = nullptr;   // hosts the existing UI under "Results"
+    QWidget*            m_legacyDashWrap  = nullptr;   // hosts existing scan-progress UI on PageScan
     DashboardPage*      m_dashboardPage   = nullptr;   // new Phase 4 dashboard (page 0)
     ThreatDetailPanel*  m_threatDetail    = nullptr;   // Phase 4 Step 3 — right-slide detail panel
+    ResultsPage*        m_resultsPage     = nullptr;   // refactored Results tab (page 2)
+    ScanPage*           m_scanPage        = nullptr;   // refactored Scan tab (page 1)
 
     void setupShell();
     QWidget* makePlaceholderPage(const QString& title, const QString& subtitle);
@@ -268,4 +272,8 @@ private slots:
     void onDashboardScanRequested(int scanType);
     void onDashboardViewAllActivity();
     void onThreatDetailCloseRequested();
+    /// New ScanPage signals
+    void onScanPageStartRequested(const QStringList& targets, int depth);
+    void onScanPageExportLogs();
+    void onScanPageViewAllRecent();
 };

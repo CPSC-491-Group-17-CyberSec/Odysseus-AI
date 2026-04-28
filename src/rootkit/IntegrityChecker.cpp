@@ -44,6 +44,7 @@
 #include <QJsonObject>
 #include <QDateTime>
 #include <QProcess>
+#include <QSysInfo>
 #include <QDebug>
 #include <QMutex>
 #include <QMutexLocker>
@@ -75,8 +76,17 @@ const QStringList& criticalPaths()
         "/bin/login",
         "/bin/bash",
         "/usr/bin/zsh",
+#elif defined(Q_OS_WIN)
+        // Minimal Windows set. These DO change with monthly Patch Tuesday
+        // updates, so the OS-version-string auto-rebase below handles it.
+        // Mismatches under the same OS version flag tampering / SFC drift.
+        "C:\\Windows\\System32\\kernel32.dll",
+        "C:\\Windows\\System32\\ntdll.dll",
+        "C:\\Windows\\System32\\cmd.exe",
+        "C:\\Windows\\System32\\svchost.exe",
+        "C:\\Windows\\explorer.exe",
 #else
-        // empty
+        // empty fallback
 #endif
     };
     return paths;
@@ -95,6 +105,9 @@ QString resolveBaselinePath()
     return cached;
 }
 
+// Returns a stable OS version string — the auto-rebase logic uses it as the
+// "did the OS update?" sentinel. Function is named "readMacosVersion" for
+// historical reasons but now covers every supported platform.
 QString readMacosVersion()
 {
 #if defined(Q_OS_MACOS)
@@ -115,8 +128,18 @@ QString readMacosVersion()
         }
     }
     return {};
+#elif defined(Q_OS_WIN)
+    // Qt's QSysInfo gives us a usable Windows version string ("10", "11",
+    // and a kernel build number we can append for slightly tighter
+    // rebase granularity).
+    return QString("%1 (build %2)")
+              .arg(QSysInfo::productVersion(),
+                   QSysInfo::kernelVersion());
 #else
-    return {};
+    // Last-ditch: any Qt-supported platform we don't have a special case
+    // for. Better than empty — at least the auto-rebase fires on a major
+    // version bump.
+    return QSysInfo::prettyProductName();
 #endif
 }
 

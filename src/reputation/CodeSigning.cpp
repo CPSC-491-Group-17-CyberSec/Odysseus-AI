@@ -192,7 +192,26 @@ Result verifyFile(const QString& filePath)
 }
 
 // ============================================================================
-// Other platforms (Windows, etc.) – stub
+// Windows implementation — stub
+// ============================================================================
+#elif defined(Q_OS_WIN)
+
+Result verifyFile(const QString& /*filePath*/)
+{
+    // Authenticode signature verification on Windows uses the WinTrust
+    // API (WinVerifyTrust + CryptQueryObject) plus parsing the X.509
+    // signing chain. That's a substantial chunk of code that we're
+    // deliberately deferring to a future pass — the priority for this
+    // Windows-compat round is "everything compiles and the app runs".
+    Result out;
+    out.status     = Status::Unknown;
+    out.rawDetails = "Authenticode signature checks not implemented yet "
+                     "on Windows (planned: WinVerifyTrust via wintrust.lib).";
+    return out;
+}
+
+// ============================================================================
+// Other platforms — stub
 // ============================================================================
 #else
 

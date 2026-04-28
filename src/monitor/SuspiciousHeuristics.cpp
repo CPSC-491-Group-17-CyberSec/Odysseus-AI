@@ -39,17 +39,44 @@ QString testPath(const ProcessInfo& p)
     const QString& path = p.exePath;
     if (path.isEmpty()) return {};
 
-    if (path.startsWith("/tmp/")
-        || path.startsWith("/var/tmp/")
-        || path.startsWith("/private/tmp/")
-        || path.startsWith("/private/var/tmp/"))
+    // Lowercase + forward-slash normalization so the same heuristics work
+    // against both Unix (/tmp/...) and Windows (C:\Users\...\Temp\...) paths.
+    QString lower = path.toLower();
+    lower.replace('\\', '/');
+
+    // ── Temp / staging directories ─────────────────────────────────────
+    // Unix
+    if (lower.startsWith("/tmp/")
+        || lower.startsWith("/var/tmp/")
+        || lower.startsWith("/private/tmp/")
+        || lower.startsWith("/private/var/tmp/"))
     {
         return QString("Executable runs from temp directory: %1").arg(path);
     }
-    if (path.contains("/Downloads/"))
+    // Windows: %TEMP% lives under either the user's local AppData or
+    // C:\Windows\Temp. Both are classic dropper staging areas.
+    if (lower.contains("/appdata/local/temp/")
+        || lower.contains("/windows/temp/"))
+    {
+        return QString("Executable runs from Windows temp directory: %1").arg(path);
+    }
+
+    // ── Downloads ──────────────────────────────────────────────────────
+    if (lower.contains("/downloads/"))
         return QString("Executable runs from Downloads: %1").arg(path);
 
-    // Hidden directory anywhere on the path
+    // ── Roaming AppData (Windows-only) ─────────────────────────────────
+    // Legitimate apps install here too (Slack, Discord). Lower severity
+    // than Temp / Downloads but still worth surfacing.
+    if (lower.contains("/appdata/roaming/")) {
+        // Skip the well-known Microsoft / WindowsApps subtree to avoid
+        // false-positives for OS components that live there.
+        if (!lower.contains("/appdata/roaming/microsoft/")) {
+            return QString("Executable runs from AppData\\Roaming: %1").arg(path);
+        }
+    }
+
+    // ── Hidden directory anywhere on the path (Unix-style dotfiles) ────
     for (const QString& seg : path.split('/', Qt::SkipEmptyParts)) {
         if (seg.size() > 1 && seg.startsWith('.') && seg != "..")
             return QString("Executable lives under hidden directory '%1'").arg(seg);
@@ -150,6 +177,8 @@ QString testCmdLine(const ProcessInfo& p)
 
 QString testRootFromUserPath(const ProcessInfo& p)
 {
+    // On Windows we don't currently collect uid/sid, so this heuristic
+    // is a no-op there — uid stays at -1 and we bail immediately.
     if (p.uid != 0)             return {};
     if (p.exePath.isEmpty())    return {};
 

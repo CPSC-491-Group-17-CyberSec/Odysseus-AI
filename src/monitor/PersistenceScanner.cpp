@@ -35,6 +35,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QDebug>
 #include <QtGlobal>
 
@@ -415,7 +416,127 @@ bool scan(QVector<PersistenceItem>& out, int& errorsLogged)
 }
 
 // ============================================================================
-// Stub
+// Windows implementation — registry Run keys + Startup folders (read-only)
+// ============================================================================
+#elif defined(Q_OS_WIN)
+
+// Walk a registry "Run" key via QSettings::NativeFormat. On Windows this
+// uses the native registry API under the hood (no shell-out, no admin
+// needed for HKCU; HKLM read works for any user).
+static void scanWindowsRunKey(const QString&    hivePath,
+                                const QString&    type,
+                                QVector<PersistenceItem>& out)
+{
+    QSettings settings(hivePath, QSettings::NativeFormat);
+    const QStringList keys = settings.allKeys();
+    for (const QString& key : keys) {
+        const QString cmd = settings.value(key).toString().trimmed();
+        if (cmd.isEmpty()) continue;
+
+        PersistenceItem it;
+        it.type         = type;
+        it.label        = key;
+        it.filePath     = hivePath;
+        it.runAtLoad    = true;
+        it.scheduleHint = "RunAtLogon (registry)";
+
+        // Parse "<program>" or "C:\\path\\foo.exe arg1 arg2" into program +
+        // programArgs. Windows command lines can quote the program path.
+        if (cmd.startsWith('"')) {
+            const int close = cmd.indexOf('"', 1);
+            if (close > 0) {
+                it.program = cmd.mid(1, close - 1);
+                const QString rest = cmd.mid(close + 1).trimmed();
+                if (!rest.isEmpty()) it.programArgs = QStringList{ rest };
+            } else {
+                it.program = cmd;
+            }
+        } else {
+            const int sp = cmd.indexOf(' ');
+            it.program = (sp > 0) ? cmd.left(sp) : cmd;
+            if (sp > 0) it.programArgs = QStringList{ cmd.mid(sp + 1).trimmed() };
+        }
+
+        // Sanity: warn if the resolved program file is missing.
+        if (!it.program.isEmpty() && !QFile::exists(it.program))
+            it.notes.append("Target executable missing on disk");
+
+        rateItem(it);
+        out.append(std::move(it));
+    }
+}
+
+// Walk a Windows "Startup" folder. Most entries are .lnk shortcuts;
+// resolving the .lnk target requires IShellLink COM, which we deliberately
+// skip in this read-only first pass — recording the .lnk path itself is
+// enough to surface "something runs at login from this folder".
+static void scanStartupFolder(const QString&    folderPath,
+                                const QString&    type,
+                                QVector<PersistenceItem>& out)
+{
+    QDir d(folderPath);
+    if (!d.exists()) return;
+
+    int found = 0;
+    for (const QFileInfo& fi : d.entryInfoList(QDir::Files | QDir::NoDotAndDotDot,
+                                                 QDir::Name))
+    {
+        PersistenceItem it;
+        it.type         = type;
+        it.filePath     = fi.absoluteFilePath();
+        it.label        = fi.fileName();
+        it.lastModified = fi.lastModified();
+        it.runAtLoad    = true;
+        it.scheduleHint = "Startup folder entry (RunAtLogon)";
+        it.program      = fi.absoluteFilePath();    // .lnk path; target unresolved
+        if (fi.suffix().toLower() == "lnk")
+            it.notes.append("Shortcut target not resolved "
+                              "(IShellLink read deferred to a later pass)");
+        rateItem(it);
+        out.append(std::move(it));
+        ++found;
+    }
+    qInfo().noquote()
+        << QString("[SysMon] %1: %2 entry/entries under %3")
+              .arg(type).arg(found).arg(folderPath);
+}
+
+bool scan(QVector<PersistenceItem>& out, int& errorsLogged)
+{
+    errorsLogged = 0;
+
+    // ── Registry Run keys ─────────────────────────────────────────────
+    scanWindowsRunKey(
+        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "Registry/Run/HKCU", out);
+    scanWindowsRunKey(
+        "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "Registry/Run/HKLM", out);
+    // RunOnce keys — fire once and remove themselves; analyst-relevant.
+    scanWindowsRunKey(
+        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+        "Registry/RunOnce/HKCU", out);
+    scanWindowsRunKey(
+        "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+        "Registry/RunOnce/HKLM", out);
+
+    // ── Startup folders ────────────────────────────────────────────────
+    const QString home = QDir::homePath();
+    scanStartupFolder(
+        home + "/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+        "Startup/CurrentUser", out);
+    scanStartupFolder(
+        "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup",
+        "Startup/AllUsers", out);
+
+    qInfo().noquote()
+        << QString("[SysMon] Windows persistence scan complete — %1 item(s)")
+              .arg(out.size());
+    return true;
+}
+
+// ============================================================================
+// Stub for any other platform
 // ============================================================================
 #else
 

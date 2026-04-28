@@ -148,6 +148,15 @@ bool diff(const QVector<ProcessInfo>& existing,
               .arg(findings.size()).arg(sev);
     return true;
 
+#elif defined(Q_OS_WIN)
+    // Windows: a Toolhelp ↔ tasklist diff is feasible but tasklist is
+    // unreliable in unattended sessions. Defer until we have a richer
+    // second source (WMI Win32_Process or WTSEnumerateProcessesEx).
+    Q_UNUSED(existing)
+    qInfo() << "[Rootkit] cross-view check not implemented on Windows yet — "
+               "skipping (Toolhelp32 + tasklist comparison planned).";
+    return false;
+
 #else
     // Linux/other: no second authoritative source distinct from /proc.
     Q_UNUSED(existing)

@@ -61,6 +61,16 @@
 #  include <sys/proc_info.h>
 #endif
 
+// ── Windows-only headers ───────────────────────────────────────────────────
+#if defined(Q_OS_WIN)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <tlhelp32.h>
+#  include <psapi.h>
+#endif
+
 // ============================================================================
 // Single namespace block — everything below lives inside ProcessEnumerator.
 // ============================================================================
@@ -327,6 +337,73 @@ bool list(QVector<ProcessInfo>& out, int& restrictedCount)
 
         out.append(std::move(info));
     }
+    return true;
+
+#elif defined(Q_OS_WIN)
+    // ── Windows path: Toolhelp32 snapshot ──────────────────────────────
+    // We pick Toolhelp over the WTS API because it's reachable without
+    // privilege and produces a stable PID/PPID/Name set across Windows
+    // 10 / 11. For each PID we then try OpenProcess at the lowest
+    // privilege level (PROCESS_QUERY_LIMITED_INFORMATION, available since
+    // Windows Vista) and call QueryFullProcessImageNameW for the path.
+    // EACCES/ERROR_ACCESS_DENIED on protected processes (System, csrss,
+    // smss, etc.) is normal — we mark them restricted and continue.
+    HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        qWarning() << "[SysMon] CreateToolhelp32Snapshot failed:"
+                   << ::GetLastError();
+        return false;
+    }
+
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    if (!::Process32FirstW(snap, &pe)) {
+        ::CloseHandle(snap);
+        qWarning() << "[SysMon] Process32FirstW failed:" << ::GetLastError();
+        return false;
+    }
+
+    const int selfPid = static_cast<int>(::GetCurrentProcessId());
+    do {
+        if (pe.th32ProcessID == 0) continue;     // skip System Idle Process
+
+        ProcessInfo info;
+        info.pid          = static_cast<int>(pe.th32ProcessID);
+        info.ppid         = static_cast<int>(pe.th32ParentProcessID);
+        info.uid          = -1;
+        info.name         = QString::fromWCharArray(pe.szExeFile);
+        info.user         = QStringLiteral("unknown");   // see resolveUser stub below
+        info.isOurProcess = (info.pid == selfPid);
+
+        // Try to upgrade name → full path using QueryFullProcessImageNameW.
+        HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,
+                                  FALSE, pe.th32ProcessID);
+        if (h) {
+            wchar_t pathBuf[MAX_PATH] = {0};
+            DWORD pathLen = MAX_PATH;
+            if (::QueryFullProcessImageNameW(h, 0, pathBuf, &pathLen)) {
+                info.exePath = QString::fromWCharArray(pathBuf, pathLen);
+            }
+            ::CloseHandle(h);
+        }
+
+        if (info.exePath.isEmpty()) {
+            // Permission denied — flag as restricted and continue.
+            info.cmdLine = QStringLiteral("(restricted)");
+            ++restrictedCount;
+        } else if (!QFile::exists(info.exePath)) {
+            info.exeMissing = true;
+        }
+
+        // We deliberately do NOT collect command line on Windows in this
+        // pass. NtQueryInformationProcess + ProcessParameters works but
+        // is complex and prone to anti-cheat / EDR conflicts. Phase 4
+        // material if we ever need it.
+
+        out.append(std::move(info));
+    } while (::Process32NextW(snap, &pe));
+
+    ::CloseHandle(snap);
     return true;
 
 #else

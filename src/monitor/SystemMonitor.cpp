@@ -47,6 +47,8 @@ public slots:
         snap.platformLabel = "macOS";
 #elif defined(Q_OS_LINUX)
         snap.platformLabel = "Linux";
+#elif defined(Q_OS_WIN)
+        snap.platformLabel = "Windows";
 #else
         snap.platformLabel = "unknown";
 #endif
