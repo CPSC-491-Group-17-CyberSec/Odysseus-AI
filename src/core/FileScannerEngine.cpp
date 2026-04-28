@@ -167,6 +167,17 @@ void FileScannerWorker::doScan()
                 sf.recommendedActions  = ce.recommendedActions;
                 sf.aiExplanation       = ce.aiExplanation;
                 sf.llmAvailable        = ce.llmAvailable;
+                // ── Phase 1 cached fields ──
+                sf.sha256              = ce.sha256;
+                sf.yaraMatches         = ce.yaraMatches;
+                sf.yaraFamily          = ce.yaraFamily;
+                sf.yaraSeverity        = ce.yaraSeverity;
+                sf.reputationFamily    = ce.reputationFamily;
+                sf.reputationSource    = ce.reputationSource;
+                sf.reputationPrevalence = ce.reputationPrevalence;
+                sf.signingStatus       = ce.signingStatus;
+                sf.signerId            = ce.signerId;
+                sf.confidencePct       = ce.confidencePct;
 
                 emit suspiciousFileFound(sf);
                 m_suspiciousCount.fetchAndAddRelaxed(1);

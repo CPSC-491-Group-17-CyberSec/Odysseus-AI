@@ -7,6 +7,10 @@
 #include "../../core/FileScanner.h"
 #include "../../db/ScanDatabase.h"   // for SuspiciousFile, ScanRecord
 #include "../ScanTypeOverlay/ScanTypeOverlay.h"
+#include "../../../include/monitor/ProcessInfo.h"   // for SystemSnapshot
+
+class SystemMonitor;
+class SystemStatusPanel;
 
 class LLMExplainer;
 
@@ -26,6 +30,10 @@ class QNetworkReply;
 class QScrollArea;
 
 class FileScanner;
+class Sidebar;
+class QStackedWidget;
+class DashboardPage;
+class ThreatDetailPanel;
 
 class MainWindow : public QMainWindow
 {
@@ -60,6 +68,13 @@ private slots:
     void onHistoryItemClicked(QListWidgetItem* item);
     void onCloseHistoryClicked();
 
+    // ---- System Status (Phase 2) ----
+    void onSystemStatusClicked();
+    void onSystemRefreshRequested();
+    void onSystemCloseRequested();
+    void onSystemSnapshotReady(const SystemSnapshot& snap);
+    void onSystemSnapshotError(const QString& message);
+
     // ---- CVE lookup ----
     void onCveLookupReply(QNetworkReply* reply);
 
@@ -74,7 +89,7 @@ private:
     // -----------------------------------------------------------------------
     // Panel identity (only one right-side panel visible at a time)
     // -----------------------------------------------------------------------
-    enum class ActivePanel { None, ThreatDetails, ScanResults, History, HistoryDetail };
+    enum class ActivePanel { None, ThreatDetails, ScanResults, History, HistoryDetail, SystemStatus };
 
     // -----------------------------------------------------------------------
     // Scan mode – determines the storage denominator shown in the scan panel
@@ -119,6 +134,7 @@ private:
     // -----------------------------------------------------------------------
     QPushButton*  runScanButton;
     QPushButton*  historyButton;      // NEW – top header
+    QPushButton*  systemStatusButton; // Phase 2 – top header
     QTableWidget* threatTable;
     QLineEdit*    searchInput;
     QComboBox*    severityFilter;
@@ -210,4 +226,46 @@ private:
     // Database
     ScanDatabase* m_db        = nullptr;
     int           m_scanCount = 0;   // used to trigger periodic cache pruning
+
+    // ---- Phase 2: System monitoring ----
+    SystemMonitor*       m_sysmon          = nullptr;
+    SystemStatusPanel*   m_systemPanel     = nullptr;
+
+    // ---- Phase 4: Dashboard shell (sidebar + page stack) ----
+    // Index values for m_pageStack: keep in sync with the order of addItem()
+    // calls inside setupShell().
+    enum NavPage {
+        PageDashboard      = 0,
+        PageScan           = 1,
+        PageResults        = 2,
+        PageSystemStatus   = 3,
+        PageRootkit        = 4,
+        PageThreatIntel    = 5,
+        PageReports        = 6,
+        PageSettings       = 7,
+    };
+    Sidebar*            m_sidebar         = nullptr;
+    QStackedWidget*     m_pageStack       = nullptr;
+    QWidget*            m_legacyDashWrap  = nullptr;   // hosts the existing UI under "Results"
+    DashboardPage*      m_dashboardPage   = nullptr;   // new Phase 4 dashboard (page 0)
+    ThreatDetailPanel*  m_threatDetail    = nullptr;   // Phase 4 Step 3 — right-slide detail panel
+
+    void setupShell();
+    QWidget* makePlaceholderPage(const QString& title, const QString& subtitle);
+
+    /// Stabilization B: hide the redundant legacy top-bar widgets (logo,
+    /// title, History/SystemStatus/RunScan buttons — all duplicated by the
+    /// sidebar) and re-skin the legacy threat table + search/filter so the
+    /// "Results" page matches the new dark theme.
+    void retireLegacyHeader();
+
+    /// Push current findings/history into the new dashboard.
+    /// No-op if the dashboard hasn't been built yet (during construction).
+    void refreshDashboard();
+
+private slots:
+    void onSidebarPageRequested(int index);
+    void onDashboardScanRequested(int scanType);
+    void onDashboardViewAllActivity();
+    void onThreatDetailCloseRequested();
 };

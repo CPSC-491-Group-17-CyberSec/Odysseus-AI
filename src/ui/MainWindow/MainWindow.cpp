@@ -2,8 +2,21 @@
 #include "../../core/FileScanner.h"
 #include "../../db/ScanDatabase.h"
 #include "../ThreatCard/ThreatCard.h"
+#include "../SystemStatusPanel/SystemStatusPanel.h"
+#include "../widgets/Sidebar.h"
+#include "../widgets/ThreatDetailPanel.h"
+#include "../theme/DashboardTheme.h"
+#include "../pages/DashboardPage.h"
+#include "../pages/SettingsPage.h"
 #include "ai/LLMExplainer.h"
 #include "ai/FeatureExtractor.h"
+#include "monitor/SystemMonitor.h"
+
+#include <QStackedWidget>
+#include <QSplitter>
+#include <QPropertyAnimation>
+#include <QVariantAnimation>
+#include <QEasingCurve>
 
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -78,6 +91,8 @@ MainWindow::MainWindow(QWidget *parent)
             this,           &MainWindow::onRunScanClicked);
     connect(historyButton,  &QPushButton::clicked,
             this,           &MainWindow::onHistoryClicked);
+    connect(systemStatusButton, &QPushButton::clicked,
+            this,               &MainWindow::onSystemStatusClicked);
     connect(searchInput,    &QLineEdit::textChanged,
             this,           &MainWindow::onFilterOrSearchChanged);
     connect(severityFilter, &QComboBox::currentTextChanged,
@@ -163,12 +178,515 @@ MainWindow::MainWindow(QWidget *parent)
         hi->setForeground(QBrush(color));
         historyList->addItem(hi);
     }
+
+    // ════════════════════════════════════════════════════════════════════
+    //  Phase 4 – Dashboard shell (Step 1)
+    //
+    //  Wrap the existing centralWidget in a new shell that adds the
+    //  sidebar nav + page stack. The legacy UI lives on page 0 unchanged
+    //  while we build the redesigned pages in subsequent steps.
+    // ════════════════════════════════════════════════════════════════════
+    setupShell();
 }
 
 MainWindow::~MainWindow()
 {
     if (m_scanner)
         m_scanner->cancelScan();
+}
+
+// ============================================================================
+//  setupShell  –  Phase 4 Step 1
+//
+//  Re-parents the existing centralWidget into a QStackedWidget as page 0,
+//  and adds a Sidebar to its left. Other pages are placeholders for now —
+//  Steps 2–5 will replace them with real content.
+// ============================================================================
+void MainWindow::setupShell()
+{
+    // Grab the centralWidget setupUi() built. We'll keep it as page 0 of
+    // the new stack so every existing slot/widget keeps working unchanged.
+    QWidget* legacyCentral = takeCentralWidget();   // detaches from QMainWindow
+    if (!legacyCentral) {
+        qWarning() << "[UI] setupShell: no central widget — bailing";
+        return;
+    }
+    m_legacyDashWrap = legacyCentral;
+
+    // ── Build new shell central widget ─────────────────────────────────
+    auto* shell = new QWidget(this);
+    shell->setObjectName("OdyShell");
+    auto* shellLayout = new QHBoxLayout(shell);
+    shellLayout->setContentsMargins(0, 0, 0, 0);
+    shellLayout->setSpacing(0);
+
+    // Sidebar
+    m_sidebar = new Sidebar(shell);
+    m_sidebar->addItem("Dashboard",        QString::fromUtf8("\xE2\x96\xA6"));   // ▦
+    m_sidebar->addItem("Scan",              QString::fromUtf8("\xE2\x9F\xB2"));   // ⟲
+    m_sidebar->addItem("Results",           QString::fromUtf8("\xE2\x96\xA4"));   // ▤
+    m_sidebar->addItem("System Status",     QString::fromUtf8("\xE2\x97\x8E"));   // ◎
+    m_sidebar->addItem("Rootkit Awareness", QString::fromUtf8("\xE2\x9B\xA8"));   // ⛨
+    m_sidebar->addItem("Threat Intel",      QString::fromUtf8("\xE2\x97\x88"));   // ◈
+    m_sidebar->addItem("Reports",           QString::fromUtf8("\xE2\x96\xA8"));   // ▨
+    m_sidebar->addItem("Settings",          QString::fromUtf8("\xE2\x9A\x99"));   // ⚙
+    m_sidebar->setFooterText("Odysseus-AI v1.0.0");
+    connect(m_sidebar, &Sidebar::pageRequested,
+            this,      &MainWindow::onSidebarPageRequested);
+    shellLayout->addWidget(m_sidebar);
+
+    // Page stack
+    m_pageStack = new QStackedWidget(shell);
+    m_pageStack->setStyleSheet(QString(
+        "QStackedWidget { background-color: %1; }").arg(Theme::Color::bgPrimary));
+
+    // Page 0 — DASHBOARD: the new Phase 4 redesigned dashboard.
+    m_dashboardPage = new DashboardPage(this);
+    m_pageStack->insertWidget(PageDashboard, m_dashboardPage);
+    connect(m_dashboardPage, &DashboardPage::scanRequested,
+            this, &MainWindow::onDashboardScanRequested);
+    connect(m_dashboardPage, &DashboardPage::viewAllActivityClicked,
+            this, &MainWindow::onDashboardViewAllActivity);
+
+    // Pages 1 — Scan: placeholder (Step 5 will host scan flow here).
+    m_pageStack->insertWidget(PageScan,
+        makePlaceholderPage("Scan",
+            "Scan setup lives on the Dashboard for now.\n"
+            "A dedicated scan-history view lands in Step 5."));
+
+    // Page 2 — RESULTS: the legacy "everything" view lives here unchanged.
+    // The threat table, scan-results panel, history panel, and existing
+    // detail panels keep working — they're just reachable via the Results
+    // sidebar item instead of being the primary view.
+    legacyCentral->setParent(nullptr);
+    m_pageStack->insertWidget(PageResults, legacyCentral);
+
+    // Page 3 — SYSTEM STATUS: reparent the existing SystemStatusPanel
+    // (built way back in Phase 2) to be its own page. It used to live
+    // inside legacyCentral and was reachable only via the now-hidden
+    // legacy "System Status" button — that's why it appeared dead.
+    if (m_systemPanel) {
+        m_systemPanel->setParent(nullptr);
+        m_systemPanel->setVisible(true);
+        m_pageStack->insertWidget(PageSystemStatus, m_systemPanel);
+    } else {
+        m_pageStack->insertWidget(PageSystemStatus,
+            makePlaceholderPage("System Status",
+                "System monitor not initialized."));
+    }
+
+    m_pageStack->insertWidget(PageRootkit,
+        makePlaceholderPage("Rootkit Awareness",
+            "Rootkit-awareness findings appear inside the System Status panel.\n"
+            "A dedicated page lands in a future release."));
+    m_pageStack->insertWidget(PageThreatIntel,
+        makePlaceholderPage("Threat Intelligence",
+            "Reputation database explorer — coming soon."));
+    m_pageStack->insertWidget(PageReports,
+        makePlaceholderPage("Reports",
+            "Export & report history — coming soon."));
+
+    // Page 7 — SETTINGS: bound to ScannerConfigStore.
+    auto* settings = new SettingsPage();
+    m_pageStack->insertWidget(PageSettings, settings);
+
+    // ── Phase 4 Step 3 + Stabilization A —————————————————————————————
+    // The page stack and the right-side ThreatDetailPanel live inside a
+    // QSplitter so the user can drag the divider, the detail panel can
+    // collapse cleanly when hidden, and toggling the panel's visibility
+    // never compresses the page-stack content unexpectedly.
+    //
+    //   Sidebar (fixed)  |  Splitter [ pageStack | threatDetail ]
+    // ─────────────────────────────────────────────────────────────────
+    m_threatDetail = new ThreatDetailPanel(shell);
+    m_threatDetail->setVisible(false);
+    connect(m_threatDetail, &ThreatDetailPanel::closeRequested,
+            this, &MainWindow::onThreatDetailCloseRequested);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, shell);
+    splitter->setHandleWidth(2);
+    splitter->setStyleSheet(QString(
+        "QSplitter::handle { background-color: %1; }"
+        "QSplitter::handle:hover { background-color: %2; }"
+    ).arg(Theme::Color::borderSubtle, Theme::Color::accentBlue));
+
+    splitter->addWidget(m_pageStack);
+    splitter->addWidget(m_threatDetail);
+    splitter->setCollapsible(0, false);   // page stack must always be visible
+    splitter->setCollapsible(1, true);     // detail panel can collapse to 0
+    splitter->setStretchFactor(0, 1);      // page stack absorbs all extra width
+    splitter->setStretchFactor(1, 0);      // detail panel keeps its own width
+    // Initial sizes: give the page stack everything; the detail panel will
+    // claim its min-width when shown.
+    splitter->setSizes({ 10000, 0 });
+    shellLayout->addWidget(splitter, 1);
+
+    setCentralWidget(shell);
+    m_pageStack->setCurrentIndex(PageDashboard);
+
+    // Window sizing constraints: prevent the user from shrinking the window
+    // smaller than the layout can sensibly hold. Resolves the "exit
+    // fullscreen breaks layout" bug.
+    setMinimumSize(1100, 720);
+
+    // Stabilization B — hide redundant legacy header + dark-theme the
+    // legacy threat table so the Results page matches the rest.
+    retireLegacyHeader();
+
+    // Initial paint: pull whatever data is already loaded (history from DB,
+    // any in-flight findings) into the new dashboard cards.
+    refreshDashboard();
+}
+
+// ============================================================================
+//  retireLegacyHeader  –  Stabilization B
+//
+//  The legacy centralWidget had its own top bar (logo + Odysseus Threat
+//  Dashboard title + History/SystemStatus/RunScan buttons + search +
+//  severity filter). The sidebar + DashboardPage now own all of those
+//  duties, so the top bar is redundant and looks out of place on the
+//  Results page. We hide it and dark-theme the threat table + filters.
+// ============================================================================
+void MainWindow::retireLegacyHeader()
+{
+    // ── Hide the entire legacy top bar ─────────────────────────────────
+    // The legacy QVBoxLayout starts with a QHBoxLayout containing
+    // logoLabel + titleLabel + spacer + History/SystemStatus/RunScan
+    // buttons. Walk that first row and hide every widget in it — covers
+    // the locals (logo, title) we don't have member pointers for.
+    if (m_legacyDashWrap) {
+        if (auto* mainLayout =
+                qobject_cast<QVBoxLayout*>(m_legacyDashWrap->layout()))
+        {
+            if (mainLayout->count() > 0) {
+                if (QLayout* header = mainLayout->itemAt(0)->layout()) {
+                    for (int i = 0; i < header->count(); ++i) {
+                        if (QWidget* w = header->itemAt(i)->widget())
+                            w->setVisible(false);
+                    }
+                }
+            }
+        }
+    }
+    // Also explicitly hide the member-pointer buttons in case the
+    // layout walk missed them (e.g. they were re-parented).
+    auto hideIf = [](QWidget* w) { if (w) w->setVisible(false); };
+    hideIf(historyButton);
+    hideIf(systemStatusButton);
+    hideIf(runScanButton);
+
+    // ── Dark-theme legacy central widget ───────────────────────────────
+    if (m_legacyDashWrap) {
+        m_legacyDashWrap->setStyleSheet(QString(
+            "QWidget { background-color: %1; color: %2;"
+            " font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',"
+            " Roboto, Helvetica, Arial, sans-serif; }"
+        ).arg(Theme::Color::bgPrimary,
+              Theme::Color::textPrimary));
+    }
+
+    // ── Re-skin the threat table (Polish.4) ────────────────────────────
+    //   • zebra striping (alternate-background-color) for legibility on
+    //     long lists
+    //   • hover row highlight via :hover pseudo-state
+    //   • selected row in accent-soft
+    //   • taller rows (48 px) so severity dot + filename aren't cramped
+    if (threatTable) {
+        threatTable->setAlternatingRowColors(true);
+        threatTable->setMouseTracking(true);          // enables :hover
+        threatTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        threatTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        if (threatTable->verticalHeader()) {
+            threatTable->verticalHeader()->setDefaultSectionSize(Theme::Size::tableRowHeight);
+            threatTable->verticalHeader()->setVisible(false);
+        }
+        threatTable->setShowGrid(false);
+
+        threatTable->setStyleSheet(QString(
+            "QTableWidget {"
+            "  background-color: %1; color: %2;"
+            "  alternate-background-color: %7;"
+            "  gridline-color: %3; border: 1px solid %3;"
+            "  border-radius: 10px; font-size: %8px;"
+            "  selection-background-color: %6;"
+            "}"
+            "QHeaderView::section {"
+            "  background-color: %4; color: %5;"
+            "  padding: 10px 12px; border: none;"
+            "  border-bottom: 1px solid %3;"
+            "  font-size: %9px; font-weight: 600;"
+            "  text-transform: uppercase; letter-spacing: 0.5px;"
+            "}"
+            "QTableWidget::item {"
+            "  padding: 10px 12px;"
+            "  border-bottom: 1px solid %3;"
+            "}"
+            "QTableWidget::item:hover {"
+            "  background-color: %10;"
+            "}"
+            "QTableWidget::item:selected {"
+            "  background-color: %6; color: white;"
+            "}"
+            "QTableCornerButton::section { background-color: %4; border: none; }"
+        )
+        .arg(Theme::Color::bgCard)         // %1
+        .arg(Theme::Color::textPrimary)    // %2
+        .arg(Theme::Color::borderSubtle)   // %3
+        .arg(Theme::Color::bgSidebar)      // %4
+        .arg(Theme::Color::textSecondary)  // %5
+        .arg(Theme::Color::accentBlueSoft) // %6
+        .arg(Theme::Color::bgSecondary)    // %7 — subtle zebra row tint
+        .arg(Theme::Type::Body)             // %8 — body font size
+        .arg(Theme::Type::Caption)          // %9 — header caption size
+        .arg(Theme::Color::bgCardHover));  // %10 — hover row highlight
+    }
+
+    // ── Search input ───────────────────────────────────────────────────
+    if (searchInput) {
+        searchInput->setPlaceholderText("Search by keyword, CVE, or vendor…");
+        searchInput->setStyleSheet(QString(
+            "QLineEdit {"
+            "  background-color: %1; color: %2;"
+            "  border: 1px solid %3; border-radius: 8px;"
+            "  padding: 8px 12px; font-size: 12px;"
+            "}"
+            "QLineEdit:focus { border-color: %4; }"
+        )
+        .arg(Theme::Color::bgCard)
+        .arg(Theme::Color::textPrimary)
+        .arg(Theme::Color::borderSubtle)
+        .arg(Theme::Color::accentBlue));
+    }
+
+    // ── Severity filter ────────────────────────────────────────────────
+    if (severityFilter) {
+        severityFilter->setStyleSheet(QString(
+            "QComboBox {"
+            "  background-color: %1; color: %2;"
+            "  border: 1px solid %3; border-radius: 8px;"
+            "  padding: 6px 12px; font-size: 12px;"
+            "}"
+            "QComboBox::drop-down { border: none; width: 24px; }"
+            "QComboBox QAbstractItemView {"
+            "  background-color: %1; color: %2;"
+            "  selection-background-color: %4;"
+            "  border: 1px solid %3;"
+            "}"
+        )
+        .arg(Theme::Color::bgCard)
+        .arg(Theme::Color::textPrimary)
+        .arg(Theme::Color::borderSubtle)
+        .arg(Theme::Color::accentBlueSoft));
+    }
+
+    // ── Polish.5 — re-skin the remaining legacy panels so the Results
+    //   page looks unified when the scan flow shows ScanResults / History
+    //   inside legacyCentral.
+    const QString panelQss = QString(
+        "QFrame {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: 12px;"
+        "  color: %3;"
+        "}"
+    ).arg(Theme::Color::bgCard,
+          Theme::Color::borderSubtle,
+          Theme::Color::textPrimary);
+
+    const QString listQss = QString(
+        "QListWidget {"
+        "  background-color: %1; color: %2;"
+        "  border: 1px solid %3; border-radius: 8px;"
+        "  padding: 6px; font-size: 12px;"
+        "}"
+        "QListWidget::item {"
+        "  padding: 8px 10px; border-bottom: 1px solid %3;"
+        "}"
+        "QListWidget::item:hover { background-color: %4; }"
+        "QListWidget::item:selected {"
+        "  background-color: %5; color: white;"
+        "}"
+    )
+    .arg(Theme::Color::bgPrimary,
+         Theme::Color::textPrimary,
+         Theme::Color::borderSubtle,
+         Theme::Color::bgCardHover,
+         Theme::Color::accentBlueSoft);
+
+    if (scanResultsPanel)  scanResultsPanel->setStyleSheet(panelQss);
+    if (historyPanel)      historyPanel->setStyleSheet(panelQss);
+    if (historyDetailPanel) historyDetailPanel->setStyleSheet(panelQss);
+
+    if (scanResultsList)  scanResultsList->setStyleSheet(listQss);
+    if (historyList)      historyList->setStyleSheet(listQss);
+    if (histDetailFilesList) histDetailFilesList->setStyleSheet(listQss);
+
+    // Inline labels inside the panels — make sure they read against dark.
+    auto reskinLabel = [](QLabel* l, int size, int weight) {
+        if (!l) return;
+        l->setStyleSheet(QString(
+            "QLabel { color: %1; %2 background: transparent; }")
+                .arg(Theme::Color::textPrimary,
+                     Theme::Type::qss(size, weight)));
+    };
+    reskinLabel(scanStatusLabel,  Theme::Type::Body,    Theme::Type::WeightSemi);
+    reskinLabel(scanPathLabel,    Theme::Type::Caption, Theme::Type::WeightRegular);
+    reskinLabel(scanElapsedLabel, Theme::Type::Caption, Theme::Type::WeightRegular);
+    reskinLabel(scanStorageLabel, Theme::Type::Caption, Theme::Type::WeightRegular);
+    reskinLabel(scanSummaryLabel, Theme::Type::Body,    Theme::Type::WeightSemi);
+    reskinLabel(histDetailTitleLabel,   Theme::Type::H1,   Theme::Type::WeightBold);
+    reskinLabel(histDetailSummaryLabel, Theme::Type::Body, Theme::Type::WeightRegular);
+
+    // Progress bar inside the scan panel
+    if (scanProgressBar) {
+        scanProgressBar->setStyleSheet(QString(
+            "QProgressBar {"
+            "  background-color: %1; border: 1px solid %2;"
+            "  border-radius: 6px; height: 10px; text-align: center;"
+            "  color: %3; font-size: 10px;"
+            "}"
+            "QProgressBar::chunk { background-color: %4; border-radius: 6px; }"
+        )
+        .arg(Theme::Color::bgPrimary,
+             Theme::Color::borderSubtle,
+             Theme::Color::textPrimary,
+             Theme::Color::accentBlue));
+    }
+
+    // Close buttons on each legacy panel
+    auto reskinCloseBtn = [](QPushButton* b) {
+        if (!b) return;
+        b->setStyleSheet(QString(
+            "QPushButton { background: %1; color: white;"
+            " border: none; border-radius: 8px;"
+            " padding: 6px 14px; font-weight: 600; font-size: 12px; }"
+            "QPushButton:hover { background: %2; }"
+        )
+        .arg(Theme::Color::accentBlueSoft, Theme::Color::accentBlueHover));
+    };
+    reskinCloseBtn(closeScanButton);
+    reskinCloseBtn(closeHistoryButton);
+    reskinCloseBtn(closeHistoryDetailButton);
+}
+
+QWidget* MainWindow::makePlaceholderPage(const QString& title,
+                                         const QString& subtitle)
+{
+    auto* page = new QWidget();
+    page->setStyleSheet(QString("background-color: %1;")
+                            .arg(Theme::Color::bgPrimary));
+
+    auto* v = new QVBoxLayout(page);
+    v->setContentsMargins(48, 48, 48, 48);
+    v->setSpacing(12);
+
+    auto* h = new QLabel(title, page);
+    h->setStyleSheet(QString(
+        "color: %1; font-size: 28px; font-weight: 700;")
+            .arg(Theme::Color::textPrimary));
+    v->addWidget(h);
+
+    auto* sub = new QLabel(subtitle, page);
+    sub->setWordWrap(true);
+    sub->setStyleSheet(QString(
+        "color: %1; font-size: 14px; line-height: 1.5;")
+            .arg(Theme::Color::textSecondary));
+    v->addWidget(sub);
+
+    // "Coming in step N" pill
+    auto* pill = new QLabel("Under construction", page);
+    pill->setAlignment(Qt::AlignCenter);
+    pill->setFixedWidth(180);
+    pill->setStyleSheet(QString(
+        "QLabel { background-color: %1; color: white;"
+        " padding: 6px 14px; border-radius: 12px;"
+        " font-size: 11px; font-weight: 600; }")
+            .arg(Theme::Color::accentBlueSoft));
+    v->addWidget(pill);
+
+    v->addStretch(1);
+    return page;
+}
+
+void MainWindow::onSidebarPageRequested(int index)
+{
+    if (!m_pageStack) return;
+    if (index < 0 || index >= m_pageStack->count()) return;
+    m_pageStack->setCurrentIndex(index);
+
+    // When the user lands on the dashboard, refresh in case findings
+    // changed while another page was visible.
+    if (index == PageDashboard)
+        refreshDashboard();
+
+    // When the user opens System Status, kick a fresh snapshot so they
+    // don't see stale data from the last visit.
+    if (index == PageSystemStatus && m_sysmon && m_systemPanel) {
+        if (!m_sysmon->isRefreshing()) {
+            m_systemPanel->setRefreshing(true);
+            m_sysmon->refresh();
+        }
+    }
+}
+
+// ============================================================================
+//  Dashboard refresh + scan-button routing
+// ============================================================================
+void MainWindow::refreshDashboard()
+{
+    if (!m_dashboardPage) return;
+    const bool running = (m_scanner && m_scanner->isRunning());
+    // Stabilization C: pass the most recent SystemSnapshot if we have one
+    // so the security score factors in suspicious processes + integrity
+    // mismatches + cross-view findings.
+    const SystemSnapshot* snapPtr = nullptr;
+    if (m_sysmon)
+        snapPtr = &m_sysmon->lastSnapshot();
+    m_dashboardPage->refresh(m_findings, m_history, running, snapPtr);
+}
+
+void MainWindow::onDashboardScanRequested(int /*scanType*/)
+{
+    // For Step 2, every scan-type click routes through the existing flow:
+    // the user gets the same ScanTypeOverlay they're used to. Step 5 may
+    // dispatch Quick / Full / Custom directly.
+    onRunScanClicked();
+}
+
+void MainWindow::onDashboardViewAllActivity()
+{
+    // Jump to the Results page where the full threat table lives.
+    if (m_pageStack)
+        m_pageStack->setCurrentIndex(PageResults);
+    if (m_sidebar)
+        m_sidebar->setActive(PageResults);
+}
+
+void MainWindow::onThreatDetailCloseRequested()
+{
+    if (!m_threatDetail) return;
+    auto* splitter = qobject_cast<QSplitter*>(m_threatDetail->parentWidget());
+    if (!splitter) {
+        m_threatDetail->setVisible(false);
+        return;
+    }
+
+    // Polish.7 — slide-out animation (mirror of the open slide).
+    const int startW = splitter->sizes().value(1, 400);
+    auto* anim = new QVariantAnimation(this);
+    anim->setDuration(180);
+    anim->setEasingCurve(QEasingCurve::InCubic);
+    anim->setStartValue(startW);
+    anim->setEndValue(0);
+    connect(anim, &QVariantAnimation::valueChanged,
+            splitter, [splitter, this](const QVariant& v) {
+                const int w = v.toInt();
+                splitter->setSizes({ width() - w, w });
+            });
+    connect(anim, &QVariantAnimation::finished, this, [this]() {
+        if (m_threatDetail) m_threatDetail->setVisible(false);
+    });
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void MainWindow::resizeEvent(QResizeEvent* e)
@@ -227,6 +745,15 @@ void MainWindow::setupUi()
         "QPushButton:hover { background-color: #333; }"
     );
 
+    // Phase 2 — System Status button
+    systemStatusButton = new QPushButton("System Status");
+    systemStatusButton->setCursor(Qt::PointingHandCursor);
+    systemStatusButton->setStyleSheet(
+        "QPushButton { background-color: #00897B; color: white; border-radius: 15px;"
+        " padding: 8px 20px; font-weight: bold; font-size: 13px; }"
+        "QPushButton:hover { background-color: #00695C; }"
+    );
+
     runScanButton = new QPushButton("Run Scan");
     runScanButton->setCursor(Qt::PointingHandCursor);
     runScanButton->setStyleSheet(
@@ -239,6 +766,8 @@ void MainWindow::setupUi()
     headerLayout->addWidget(titleLabel);
     headerLayout->addSpacerItem(headerSpacer);
     headerLayout->addWidget(historyButton);
+    headerLayout->addSpacing(10);
+    headerLayout->addWidget(systemStatusButton);
     headerLayout->addSpacing(10);
     headerLayout->addWidget(runScanButton);
     mainLayout->addLayout(headerLayout);
@@ -699,6 +1228,24 @@ void MainWindow::setupUi()
             this, &MainWindow::onCloseHistoryClicked);
     connect(backToHistBtn, &QPushButton::clicked,
             this, &MainWindow::onHistoryClicked);
+
+    // ════════════════════════════════════════════════════════════════════
+    //  Phase 2 — System Status panel + monitor
+    // ════════════════════════════════════════════════════════════════════
+    m_systemPanel = new SystemStatusPanel();
+    contentLayout->addWidget(m_systemPanel, 3);
+    m_systemPanel->setVisible(false);
+
+    m_sysmon = new SystemMonitor(this);
+
+    connect(m_systemPanel, &SystemStatusPanel::refreshRequested,
+            this,          &MainWindow::onSystemRefreshRequested);
+    connect(m_systemPanel, &SystemStatusPanel::closeRequested,
+            this,          &MainWindow::onSystemCloseRequested);
+    connect(m_sysmon,      &SystemMonitor::snapshotReady,
+            this,          &MainWindow::onSystemSnapshotReady);
+    connect(m_sysmon,      &SystemMonitor::snapshotError,
+            this,          &MainWindow::onSystemSnapshotError);
 }
 
 // ============================================================================
@@ -711,6 +1258,8 @@ void MainWindow::showPanel(ActivePanel panel)
     scanResultsPanel->setVisible(panel   == ActivePanel::ScanResults);
     historyPanel->setVisible(panel       == ActivePanel::History);
     historyDetailPanel->setVisible(panel == ActivePanel::HistoryDetail);
+    if (m_systemPanel)
+        m_systemPanel->setVisible(panel  == ActivePanel::SystemStatus);
 }
 
 // ============================================================================
@@ -848,14 +1397,40 @@ void MainWindow::addScanFindingToTable(const SuspiciousFile& sf)
 
     QString dateText = sf.lastModified.toString("M/dd/yyyy");
 
+    // Polish.4 — prefix the severity column with a colored dot glyph so
+    // the row's threat-level reads at a glance regardless of column width.
+    sevText = QString::fromUtf8("\xE2\x97\x8F  ") + sevText;   // ●
+
+    // Polish.4 — build a "Why flagged" tooltip from the top key indicators
+    // (or the legacy reason string if no AI indicators are available).
+    // Hovering any cell in the row surfaces this text.
+    QString whyFlagged;
+    if (!sf.keyIndicators.isEmpty()) {
+        whyFlagged = "Why flagged:\n";
+        const int n = qMin(3, int(sf.keyIndicators.size()));
+        for (int i = 0; i < n; ++i)
+            whyFlagged += QString::fromUtf8("\xE2\x80\xA2 ")
+                            + sf.keyIndicators[i] + "\n";
+    } else if (!sf.reason.isEmpty()) {
+        whyFlagged = "Why flagged:\n" + sf.reason;
+    }
+    // Always-on row tooltip, fallback to filename if we have nothing else.
+    if (whyFlagged.isEmpty()) whyFlagged = sf.fileName;
+
+    // Override foreground colors against the new dark table background:
+    // black would be invisible. We use textPrimary (off-white) for plain
+    // cells and keep the severity/AI/confidence-tint colors on theirs.
+    const QColor darkText = QColor(Theme::Color::textPrimary);
+
     // 7 columns: Severity, Name, AI Classification, Confidence, Vendor, Published, Status
     QStringList cols = {sevText, nameText, aiClassText, confText, vendorText, dateText, "Detected"};
-    QList<QColor> colColors = {sevColor, Qt::black, aiClassColor, confColor,
-                               Qt::black, Qt::black, Qt::black};
+    QList<QColor> colColors = {sevColor, darkText, aiClassColor, confColor,
+                               darkText, darkText, darkText};
     for (int i = 0; i < cols.size(); ++i) {
         auto* item = new QTableWidgetItem(cols[i]);
         item->setForeground(QBrush(colColors[i]));
         if (i == 0 || i == 2) item->setFont(QFont("", -1, QFont::Bold));
+        item->setToolTip(whyFlagged);   // Polish.4 — "Why flagged" hover
         // Store full path in UserRole for the detail popup
         item->setData(Qt::UserRole,     sf.filePath);
         item->setData(Qt::UserRole + 1, sf.reason);
@@ -1015,6 +1590,39 @@ void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
             m_detailFindingIdx = findingIdx;   // track which finding is shown
             const SuspiciousFile& sf = m_findings[findingIdx];
 
+            // Phase 4 Step 3 + Polish.7 ——————————————————————————————————
+            // Populate and slide-in the right-side detail panel. The
+            // splitter sizes are animated over ~180ms with an easing
+            // curve so the panel doesn't pop into place.
+            if (m_threatDetail) {
+                m_threatDetail->setFile(sf);
+                if (!m_threatDetail->isVisible()) {
+                    m_threatDetail->setVisible(true);
+                    if (auto* splitter =
+                            qobject_cast<QSplitter*>(m_threatDetail->parentWidget()))
+                    {
+                        const int targetW = 400;
+                        const int startW  = 0;
+                        // Initial-frame collapse so the animation actually
+                        // sweeps from 0 → targetW (rather than from
+                        // whatever stale size the splitter remembers).
+                        splitter->setSizes({ width() - startW, startW });
+
+                        auto* anim = new QVariantAnimation(this);
+                        anim->setDuration(180);
+                        anim->setEasingCurve(QEasingCurve::OutCubic);
+                        anim->setStartValue(startW);
+                        anim->setEndValue(targetW);
+                        connect(anim, &QVariantAnimation::valueChanged,
+                                splitter, [splitter, this](const QVariant& v) {
+                                    const int w = v.toInt();
+                                    splitter->setSizes({ width() - w, w });
+                                });
+                        anim->start(QAbstractAnimation::DeleteWhenStopped);
+                    }
+                }
+            }
+
             // Resolve display level + colour
             QString displayLevel = !sf.classificationLevel.isEmpty()
                                        ? sf.classificationLevel
@@ -1069,6 +1677,90 @@ void MainWindow::onThreatDoubleClicked(int row, int /*column*/)
             descHtml += "<span style='font-size:12px; color:#555;'>"
                         + QString::number(sf.sizeBytes) + " bytes &nbsp;|&nbsp; "
                         + sf.lastModified.toString("yyyy-MM-dd hh:mm:ss") + "</span>";
+
+            // ════════════════════════════════════════════════════════════
+            //  Phase 1: Threat Intelligence (YARA, reputation, signing,
+            //  confidence). Only render the block if at least one signal
+            //  is present so we don't pollute the panel with empty rows.
+            // ════════════════════════════════════════════════════════════
+            const bool hasYara       = !sf.yaraMatches.isEmpty();
+            const bool hasReputation = !sf.reputationFamily.isEmpty()
+                                       || sf.reputationPrevalence > 0;
+            const bool hasSigning    = (sf.signingStatus >= 0);
+            const bool hasConfidence = (sf.confidencePct > 0.0f);
+
+            if (hasYara || hasReputation || hasSigning || hasConfidence
+                || !sf.sha256.isEmpty())
+            {
+                QString tiHtml;
+                tiHtml += "<div style='background-color:#F0F4F8; border-radius:8px;"
+                          " padding:10px 14px; margin:8px 0 0 0;"
+                          " border-left:4px solid #1976D2;'>";
+                tiHtml += "<span style='font-size:13px; font-weight:bold; color:#0D47A1;'>"
+                          "\xF0\x9F\x9B\xA1 Threat Intelligence</span><br>";
+
+                if (hasConfidence) {
+                    QString confColor = (sf.confidencePct >= 80.0f) ? "#C62828"
+                                      : (sf.confidencePct >= 60.0f) ? "#E65100"
+                                      : (sf.confidencePct >= 40.0f) ? "#F57F17"
+                                                                    : "#2E7D32";
+                    tiHtml += QString("<span style='font-size:12px; color:#555;'>"
+                                      "Confidence: <b style='color:%1;'>%2%</b>"
+                                      "</span><br>")
+                                  .arg(confColor)
+                                  .arg(QString::number(sf.confidencePct, 'f', 0));
+                }
+
+                if (hasYara) {
+                    tiHtml += "<span style='font-size:12px; color:#555;'>"
+                              "YARA: <b>" + sf.yaraMatches.join(", ") + "</b>";
+                    if (!sf.yaraFamily.isEmpty())
+                        tiHtml += " &nbsp;\xE2\x80\x94 family <b>"
+                                  + sf.yaraFamily + "</b>";
+                    if (!sf.yaraSeverity.isEmpty())
+                        tiHtml += " &nbsp;(" + sf.yaraSeverity + ")";
+                    tiHtml += "</span><br>";
+                }
+
+                if (hasReputation) {
+                    tiHtml += "<span style='font-size:12px; color:#555;'>Reputation: ";
+                    if (!sf.reputationFamily.isEmpty())
+                        tiHtml += "<b>" + sf.reputationFamily + "</b>";
+                    if (!sf.reputationSource.isEmpty())
+                        tiHtml += QString(" &nbsp;(source: %1)")
+                                      .arg(sf.reputationSource);
+                    if (sf.reputationPrevalence > 0)
+                        tiHtml += QString(" &nbsp;\xE2\x80\xA2 seen %1\xC3\x97 on this host")
+                                      .arg(sf.reputationPrevalence);
+                    tiHtml += "</span><br>";
+                }
+
+                if (hasSigning) {
+                    QString signText, signColor;
+                    switch (sf.signingStatus) {
+                        case 2: signText = "signed (trusted)";   signColor = "#2E7D32"; break;
+                        case 1: signText = "signed (untrusted)"; signColor = "#F57F17"; break;
+                        case 0: signText = "UNSIGNED";           signColor = "#C62828"; break;
+                        default: signText = "unknown";           signColor = "#888";    break;
+                    }
+                    tiHtml += QString("<span style='font-size:12px; color:#555;'>"
+                                      "Signature: <b style='color:%1;'>%2</b>")
+                                  .arg(signColor, signText);
+                    if (!sf.signerId.isEmpty())
+                        tiHtml += QString(" &nbsp;\xE2\x80\x94 %1").arg(sf.signerId);
+                    tiHtml += "</span><br>";
+                }
+
+                if (!sf.sha256.isEmpty()) {
+                    tiHtml += QString("<span style='font-size:10px; color:#777;"
+                                      " font-family: monospace;'>"
+                                      "SHA-256: %1</span>")
+                                  .arg(sf.sha256);
+                }
+                tiHtml += "</div>";
+                descHtml += tiHtml;
+            }
+
             detailsDescLabel->setText(descHtml);
 
             // ════════════════════════════════════════════════════════════
@@ -1440,6 +2132,7 @@ void MainWindow::onProgressUpdated(int percent)
 void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file)
 {
     m_findings.append(file);
+    refreshDashboard();   // live-update the new dashboard cards
 
     // Use classification-aware log label instead of always "[SUSPICIOUS]"
     QString logLabel = "[FLAGGED]";
@@ -1591,6 +2284,8 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
     Q_UNUSED(suspiciousCount)   // per-category counts are computed from m_findings instead
     m_scanTimer->stop();
     m_scanActive = false;
+    // Dashboard is updated again after the ScanRecord lands in m_history
+    // (at the end of this function).
 
     runScanButton->setText("Run Scan");
     runScanButton->setStyleSheet(
@@ -1756,6 +2451,10 @@ void MainWindow::onScanFinished(int totalScanned, int suspiciousCount, int elaps
         if (m_scanCount % 5 == 0)
             m_db->pruneStaleCache();
     }
+
+    // Phase 4: refresh the new dashboard cards now that history has the
+    // completed ScanRecord with totalScanned + per-category counts.
+    refreshDashboard();
 }
 
 void MainWindow::onScanError(const QString& message)
@@ -1853,6 +2552,56 @@ void MainWindow::onHistoryItemClicked(QListWidgetItem* item)
 void MainWindow::onCloseHistoryClicked()
 {
     showPanel(ActivePanel::None);
+}
+
+// ============================================================================
+// PHASE 2 — System Status slots
+// ============================================================================
+void MainWindow::onSystemStatusClicked()
+{
+    if (!m_systemPanel || !m_sysmon) return;
+
+    // Show the panel immediately with whatever last snapshot we have.
+    showPanel(ActivePanel::SystemStatus);
+    m_systemPanel->setSnapshot(m_sysmon->lastSnapshot());
+
+    // Kick off a fresh refresh in the background so the user sees current data.
+    if (!m_sysmon->isRefreshing()) {
+        m_systemPanel->setRefreshing(true);
+        m_sysmon->refresh();
+    }
+}
+
+void MainWindow::onSystemRefreshRequested()
+{
+    if (!m_sysmon) return;
+    if (m_sysmon->isRefreshing()) return;       // already in flight
+    m_systemPanel->setRefreshing(true);
+    m_sysmon->refresh();
+}
+
+void MainWindow::onSystemCloseRequested()
+{
+    // Phase 4 Step 5 — System Status now lives on its own page, so the
+    // panel's Close button should navigate back to the Dashboard rather
+    // than just hide the panel (it would leave an empty page behind).
+    if (m_pageStack) m_pageStack->setCurrentIndex(PageDashboard);
+    if (m_sidebar)   m_sidebar->setActive(PageDashboard);
+}
+
+void MainWindow::onSystemSnapshotReady(const SystemSnapshot& snap)
+{
+    if (m_systemPanel) m_systemPanel->setSnapshot(snap);
+    // Stabilization C — re-score the dashboard whenever System Monitoring
+    // produces a new snapshot. The new score factors in suspicious
+    // processes + integrity mismatches + cross-view findings.
+    refreshDashboard();
+}
+
+void MainWindow::onSystemSnapshotError(const QString& message)
+{
+    qWarning().noquote() << "[SysMon] snapshot error:" << message;
+    if (m_systemPanel) m_systemPanel->setRefreshing(false);
 }
 
 void MainWindow::showHistoryDetail(const ScanRecord& record)

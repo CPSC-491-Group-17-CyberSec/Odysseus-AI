@@ -252,9 +252,17 @@ bool ScanDatabase::createSchema(sqlite3* db)
         return false;
     }
     // Migrate existing scan_cache tables that lack the v2 columns.
-    // Errors are expected (column already exists) and silently ignored.
-    for (int i = 0; kMigrateCacheColumns[i]; ++i)
-        execSql(db, kMigrateCacheColumns[i]);
+    // The "duplicate column name" error is EXPECTED on every run after
+    // the first (the column already exists) — pass `&migrateErr` so
+    // execSql doesn't log internally, then qWarning only on real errors.
+    for (int i = 0; kMigrateCacheColumns[i]; ++i) {
+        QString migrateErr;
+        if (!execSql(db, kMigrateCacheColumns[i], &migrateErr)
+            && !migrateErr.contains("duplicate column", Qt::CaseInsensitive))
+        {
+            qWarning().noquote() << migrateErr;
+        }
+    }
 
     if (!execSql(db, kCreateStateTable, &err)) {
         qWarning() << "ScanDatabase::createSchema state table:" << err;
@@ -772,8 +780,16 @@ void ScanDatabase::WriterThread::run()
     execSql(db, kCreateScansTable);
     execSql(db, kCreateFindingsTable);
     execSql(db, kCreateCacheTable);
-    for (int i = 0; kMigrateCacheColumns[i]; ++i)
-        execSql(db, kMigrateCacheColumns[i]);
+    // Suppress the expected "duplicate column" message on re-runs; warn
+    // for any other migration error.
+    for (int i = 0; kMigrateCacheColumns[i]; ++i) {
+        QString migrateErr;
+        if (!execSql(db, kMigrateCacheColumns[i], &migrateErr)
+            && !migrateErr.contains("duplicate column", Qt::CaseInsensitive))
+        {
+            qWarning().noquote() << migrateErr;
+        }
+    }
     execSql(db, kCreateStateTable);
 
     qDebug() << "ScanDatabase WriterThread: started, db =" << m_dbPath;

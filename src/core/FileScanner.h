@@ -13,18 +13,30 @@
 #include <QMutex>
 #include <QWaitCondition>
 
-// Forward-declare for checkByAI parameter
+// Forward-declare for checkByAI / checkByYara parameter
 struct SuspiciousFile;
 
 // ---------------------------------------------------------------------------
-// AI-based anomaly detector  –  called from runHashWorker() as a second pass
-// after hash-based detection.  Defined in FileScannerDetectors.cpp.
+// AI-based anomaly detector  –  called from runHashWorker() as a third pass
+// after hash- and YARA-based detection.  Defined in FileScannerDetectors.cpp.
 // ---------------------------------------------------------------------------
 bool checkByAI(const QString& filePath,
                qint64         fileSize,
                QString&       outReason,
                QString&       outCategory,
                SuspiciousFile* outDetails = nullptr);
+
+// ---------------------------------------------------------------------------
+// YARA-based detector  –  called from runHashWorker() as a second pass after
+// hash lookup.  Returns true if any YARA rule fires.  Populates outDetails
+// with rule names, family attribution, and severity. Defined in
+// FileScannerDetectors.cpp.
+// ---------------------------------------------------------------------------
+bool checkByYara(const QString& filePath,
+                 qint64         fileSize,
+                 QString&       outReason,
+                 QString&       outCategory,
+                 SuspiciousFile* outDetails = nullptr);
 
 // ---------------------------------------------------------------------------
 // SuspiciousFile  –  one flagged file
@@ -52,6 +64,18 @@ struct SuspiciousFile
     QStringList keyIndicators;           // top contributing factors (embedded AI)
     QString   aiSummary;                 // embedded AI concise explanation
     QStringList recommendedActions;      // embedded AI action items
+
+    // ── Phase 1: SHA-256, YARA, reputation, code signing ────────────────
+    QString     sha256;                  // file SHA-256 (filled if computed)
+    QStringList yaraMatches;             // names of YARA rules that fired
+    QString     yaraFamily;              // first family= meta tag from a match
+    QString     yaraSeverity;            // worst severity= across fired rules
+    QString     reputationFamily;        // family from reputation DB (if known)
+    QString     reputationSource;        // where the reputation row came from
+    int         reputationPrevalence = 0;// times we've seen this hash on this host
+    int         signingStatus     = -1;  // CodeSigning::Status as int
+    QString     signerId;                // Authority / Team-ID / package name
+    float       confidencePct     = 0.0f;// 0-100 derived from anomalyScore + indicators
 };
 
 // ---------------------------------------------------------------------------
@@ -95,6 +119,18 @@ struct CacheEntry
     QStringList recommendedActions;
     QString     aiExplanation;   // LLM explanation (may be empty)
     bool        llmAvailable = false;
+
+    // ── Phase 1 cache fields (mirror SuspiciousFile) ───────────────────
+    QString     sha256;
+    QStringList yaraMatches;
+    QString     yaraFamily;
+    QString     yaraSeverity;
+    QString     reputationFamily;
+    QString     reputationSource;
+    int         reputationPrevalence = 0;
+    int         signingStatus     = -1;
+    QString     signerId;
+    float       confidencePct     = 0.0f;
 };
 
 // ---------------------------------------------------------------------------

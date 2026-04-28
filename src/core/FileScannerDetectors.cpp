@@ -34,6 +34,7 @@
 #include "ai/LLMExplainer.h"
 #include "ai/ScanResultFormatter.h"
 #include "ai/FileTypeScoring.h"
+#include "core/ScannerConfig.h"
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -235,10 +236,11 @@ bool checkByAI(const QString& filePath,
 
         std::vector<float> emberFeatures = extractEmberFeatures(filePath.toStdString());
         if (!emberFeatures.empty()) {
+            const bool verbose = ScannerConfigStore::current().verboseLogging;
             // Try LightGBM native first (full accuracy)
             if (g_emberLgbmDet && g_emberLgbmDet->isLoaded()) {
                 emberScore = g_emberLgbmDet->score(emberFeatures);
-                if (emberScore >= 0.0f) {
+                if (emberScore >= 0.0f && verbose) {
                     std::cout << "[AI:EMBER] PE file — LightGBM score: "
                               << std::fixed << std::setprecision(3) << emberScore
                               << "  (v2/v3 score: " << rawScore << ")" << std::endl;
@@ -247,7 +249,7 @@ bool checkByAI(const QString& filePath,
             // Fall back to ONNX v4
             else if (g_emberOnnxDet && g_emberOnnxDet->isLoaded()) {
                 emberScore = g_emberOnnxDet->score(emberFeatures);
-                if (emberScore >= 0.0f) {
+                if (emberScore >= 0.0f && verbose) {
                     std::cout << "[AI:EMBER] PE file — ONNX score: "
                               << std::fixed << std::setprecision(3) << emberScore
                               << "  (v2/v3 score: " << rawScore << ")" << std::endl;
@@ -341,22 +343,25 @@ bool checkByAI(const QString& filePath,
             (cr.level == ClassificationLevel::Suspicious ||
              cr.level == ClassificationLevel::Critical))
         {
-            std::cout << "[POST-CLASS] Downgrading "
-                      << QFileInfo(filePath).fileName().toStdString()
-                      << " from " << classificationToString(cr.level)
-                      << " → Anomalous (" << capReason << ")\n";
+            if (ScannerConfigStore::current().verboseLogging) {
+                std::cout << "[POST-CLASS] Downgrading "
+                          << QFileInfo(filePath).fileName().toStdString()
+                          << " from " << classificationToString(cr.level)
+                          << " → Anomalous (" << capReason << ")\n";
+            }
             cr.level    = ClassificationLevel::Anomalous;
             cr.severity = SeverityLevel::Low;
             cr.suppressed = true;
         }
     }
 
-    // ── DIAGNOSTIC: full pipeline dump for every file ────────────────────
-    // This is the single most important diagnostic block.  It lets you see
-    // the entire pipeline: raw features → raw ONNX score → calibrated score
-    // → indicators → verdict.  Run against benign validation files to
-    // determine whether the problem is model, calibration, or classification.
-    {
+    // ── DIAGNOSTIC: full pipeline dump (verbose mode only) ──────────────
+    // This block lets you see the entire pipeline: raw features → raw ONNX
+    // score → calibrated score → indicators → verdict.  It is extremely
+    // noisy on a real scan (one block per file), so it's gated behind the
+    // `verboseLogging` config toggle.  Flip it on while tuning calibration
+    // or investigating false positives.
+    if (ScannerConfigStore::current().verboseLogging) {
         FileCategory diagCat = categorizeExtension(ext);
         const FileTypeProfile& diagProfile = FileTypeProfiles::getProfile(diagCat);
         float calibrated = diagProfile.calibration.calibrate(rawScore);

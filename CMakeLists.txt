@@ -8,9 +8,10 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Charts)
 
-# Copy the malware hash database next to the executable at build time
+# Copy the malware hash database AND YARA rules next to the executable at build time.
+# The data/ tree contains: malware_hashes.txt, yara_rules/, anomaly_model_*.onnx, etc.
 file(COPY ${CMAKE_SOURCE_DIR}/data DESTINATION ${CMAKE_BINARY_DIR})
 
 qt_add_resources(APP_RESOURCES resources/resources.qrc)
@@ -22,6 +23,22 @@ add_executable(main
     src/ui/MainWindow/MainWindow.cpp
     src/ui/ThreatCard/ThreatCard.cpp
     src/ui/ScanTypeOverlay/ScanTypeOverlay.cpp
+    src/ui/SystemStatusPanel/SystemStatusPanel.cpp  # Phase 2 system status panel
+    # Phase 4 – UI redesign (Step 1: theme + sidebar shell)
+    src/ui/theme/DashboardTheme.cpp
+    src/ui/widgets/Sidebar.cpp
+    # Phase 4 – Step 2: Dashboard widgets + page
+    src/ui/widgets/StatCard.cpp
+    src/ui/widgets/DonutChart.cpp
+    src/ui/widgets/ScanTypeSelector.cpp
+    src/ui/widgets/SecurityScoreCard.cpp
+    src/ui/widgets/ActivityList.cpp
+    src/ui/pages/DashboardPage.cpp
+    # Phase 4 – Step 3: right-slide threat detail panel
+    src/ui/widgets/ThreatDetailPanel.cpp
+    # Phase 4 – Step 4: settings page + toggle widgets
+    src/ui/widgets/ToggleRow.cpp
+    src/ui/pages/SettingsPage.cpp
     # Scanner engine – FileScanner.cpp is the AUTOMOC anchor (includes the header
     # so CMake generates moc_FileScanner.cpp). All implementations are in the
     # focused TUs below, compiled with per-file optimization flags.
@@ -30,6 +47,8 @@ add_executable(main
     src/core/FileScannerHash.cpp    # hash DB + SHA-256 detection (-O3)
     src/core/FileScannerEngine.cpp  # doScan loop + FileScanner controller (-O2)
     src/core/FileScannerDetectors.cpp  # AI anomaly detection pass
+    src/core/FileScannerYaraReputation.cpp  # YARA pass + reputation singletons (Phase 1)
+    src/core/ScannerConfig.cpp      # Phase 1.5 – per-feature toggles
     # AI / ML subsystem
     src/ai/FeatureExtractor.cpp    # 38-feature vector extraction (v2/v3)
     src/ai/EmberFeatureExtractor.cpp # 2381-feature EMBER PE extraction (v4)
@@ -38,14 +57,33 @@ add_executable(main
     src/ai/LLMExplainer.cpp        # Ollama-based LLM threat explanation
     src/db/ScanDatabase.cpp        # SQLite persistence layer
     src/db/sqlite3.c               # SQLite amalgamation – no install required
+    # Phase 1 – YARA + reputation + code signing
+    src/scanner/YaraScanner.cpp        # libyara wrapper (3rd detection pass)
+    src/reputation/ReputationDB.cpp    # structured local reputation database
+    src/reputation/CodeSigning.cpp     # codesign / signature verification
+    # Phase 2 – System monitoring
+    src/monitor/ProcessEnumerator.cpp  # macOS sysctl + Linux /proc process listing
+    src/monitor/PersistenceScanner.cpp # LaunchAgents/Daemons + cron + systemd
+    src/monitor/SuspiciousHeuristics.cpp # process-flagging logic
+    src/monitor/SystemMonitor.cpp      # orchestrator QObject
+    # Header listed explicitly so AUTOMOC scans it (it lives under include/
+    # rather than next to the .cpp, which breaks AUTOMOC's same-directory
+    # auto-pairing rule).
+    include/monitor/SystemMonitor.h
+    # Phase 3 – Rootkit awareness (user-space only)
+    src/rootkit/ProcessCrossView.cpp        # sysctl ↔ ps PID-set diff
+    src/rootkit/KernelExtensionScanner.cpp  # systemextensionsctl + kmutil
+    src/rootkit/IntegrityChecker.cpp        # critical-path SHA-256 baseline
+    src/rootkit/RootkitMonitor.cpp          # orchestrator (plain namespace)
 )
 
 target_include_directories(main PRIVATE
     src/core
-    include           # ai/FeatureExtractor.h, ai/AnomalyDetector.h
+    src               # for src/scanner/, src/reputation/, src/db/
+    include           # ai/FeatureExtractor.h, ai/AnomalyDetector.h, scanner/, reputation/
 )
 
-target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network)
+target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network Qt6::Charts)
 
 # -----------------------------
 # ONNX Runtime (optional – AI anomaly detection)
@@ -99,6 +137,53 @@ if(LIGHTGBM_LIBRARY AND LIGHTGBM_INCLUDE)
 else()
     message(STATUS "LightGBM NOT found – will fall back to ONNX-based EMBER detection (~86.5%). "
                    "Install with: brew install lightgbm")
+endif()
+
+# -----------------------------
+# libyara (optional – YARA rule scanning, Phase 1)
+# -----------------------------
+# If libyara is installed, find and link it. If not, the build still
+# succeeds: YaraScanner.cpp compiles a stub that disables YARA detection
+# (the C macro ODY_HAS_YARA gates the real implementation).
+#
+# macOS (Apple Silicon):  brew install yara          → /opt/homebrew
+# macOS (Intel):          brew install yara          → /usr/local
+# Linux (Debian/Ubuntu):  sudo apt install libyara-dev
+# Linux (Fedora/RHEL):    sudo dnf install yara-devel
+set(YARA_FOUND FALSE)
+
+# Try pkg-config first (most reliable)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(YARA QUIET yara)
+endif()
+
+if(YARA_FOUND)
+    target_include_directories(main PRIVATE ${YARA_INCLUDE_DIRS})
+    target_link_libraries(main PRIVATE ${YARA_LIBRARIES})
+    target_link_directories(main PRIVATE ${YARA_LIBRARY_DIRS})
+    target_compile_definitions(main PRIVATE ODY_HAS_YARA=1)
+    message(STATUS "libyara found via pkg-config – YARA rule scanning enabled")
+else()
+    # Fallback: search common Homebrew/system locations directly
+    find_library(YARA_LIBRARY NAMES yara libyara
+        HINTS /opt/homebrew/lib /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu
+    )
+    find_path(YARA_INCLUDE_DIR NAMES yara.h
+        HINTS /opt/homebrew/include /usr/local/include /usr/include
+    )
+    if(YARA_LIBRARY AND YARA_INCLUDE_DIR)
+        target_include_directories(main PRIVATE ${YARA_INCLUDE_DIR})
+        target_link_libraries(main PRIVATE ${YARA_LIBRARY})
+        target_compile_definitions(main PRIVATE ODY_HAS_YARA=1)
+        set(YARA_FOUND TRUE)
+        message(STATUS "libyara found – YARA rule scanning enabled")
+        message(STATUS "  Library: ${YARA_LIBRARY}")
+        message(STATUS "  Include: ${YARA_INCLUDE_DIR}")
+    else()
+        message(STATUS "libyara NOT found – YARA rule scanning will be disabled "
+                       "(stub compiled). Install with: brew install yara  (macOS)")
+    endif()
 endif()
 
 # Per-file optimization flags for the hot scanner paths.

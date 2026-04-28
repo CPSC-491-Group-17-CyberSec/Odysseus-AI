@@ -1,0 +1,263 @@
+// ============================================================================
+// SecurityScoreCard.cpp
+//
+// ScoreGauge: a custom QWidget painted as a 180° semicircle gauge.
+//   - Outer arc: thin red→yellow→green sweep (the full possible range)
+//   - Inner arc: thicker fill at the actual score, in the score's color
+//   - We compute the score color by piecewise-linear ramp 0→50→100.
+// ============================================================================
+
+#include "SecurityScoreCard.h"
+#include "../theme/DashboardTheme.h"
+
+#include <QtCharts/QChart>
+#include <QtCharts/QChartView>
+#include <QtCharts/QLineSeries>
+#include <QtCharts/QValueAxis>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPainter>
+#include <QPainterPath>
+#include <QConicalGradient>
+
+// ---------------------------------------------------------------------------
+// ScoreGauge — custom-painted semicircle
+//
+// Polish pass: draws the score number INSIDE the arc (matches the mockup
+// where the user sees "92" centered in the gauge). Below the number we
+// draw a small "/100" caption so there's no ambiguity about the scale.
+// The companion SecurityScoreCard removes the duplicate score label
+// underneath.
+// ---------------------------------------------------------------------------
+class ScoreGauge : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit ScoreGauge(QWidget* parent = nullptr) : QWidget(parent) {
+        setMinimumHeight(170);
+        setMinimumWidth(240);
+    }
+    void setScore(int s) { m_score = qBound(0, s, 100); update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        // Use the bottom half of a centered square as the gauge area.
+        const int margin = 8;
+        const int side = qMin(width() - 2*margin, (height() - margin) * 2);
+        QRectF rect(width()/2.0 - side/2.0, margin, side, side);
+
+        const int penWidth = qMax(10, side / 16);
+
+        // ── Background arc (range red → yellow → green, 3 segments) ────
+        p.setPen(QPen(QColor(Theme::Color::severityCritical),
+                       penWidth, Qt::SolidLine, Qt::FlatCap));
+        p.drawArc(rect, 180 * 16, -60 * 16);
+        p.setPen(QPen(QColor(Theme::Color::severityMedium),
+                       penWidth, Qt::SolidLine, Qt::FlatCap));
+        p.drawArc(rect, 120 * 16, -60 * 16);
+        p.setPen(QPen(QColor(Theme::Color::severitySafe),
+                       penWidth, Qt::SolidLine, Qt::FlatCap));
+        p.drawArc(rect, 60 * 16, -60 * 16);
+
+        // ── Score-fill arc (in score color, drawn on top) ──────────────
+        const double t = m_score / 100.0;
+        const int sweep = static_cast<int>(180 * 16 * t);
+        QPen scorePen{QColor(scoreColor(m_score))};
+        scorePen.setWidth(penWidth + 2);
+        scorePen.setCapStyle(Qt::RoundCap);
+        p.setPen(scorePen);
+        p.drawArc(rect, 180 * 16, -sweep);
+
+        // ── Needle dot at the current score angle ───────────────────────
+        const double angleDeg = 180.0 - 180.0 * t;
+        const double angleRad = angleDeg * M_PI / 180.0;
+        const QPointF center = rect.center();
+        const double radius = rect.width()/2.0 - penWidth/2.0;
+        const QPointF dot(center.x() + std::cos(angleRad) * radius,
+                          center.y() - std::sin(angleRad) * radius);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(Theme::Color::textPrimary));
+        p.drawEllipse(dot, penWidth * 0.55, penWidth * 0.55);
+
+        // ── Score number + "/100" inside the gauge bowl ─────────────────
+        // The semicircle's "bowl" is the upper portion — text goes there,
+        // vertically centered at ~70% of the rect height.
+        const QRectF textRect(rect.left(),
+                              rect.top() + rect.height() * 0.30,
+                              rect.width(),
+                              rect.height() * 0.42);
+
+        QFont scoreFont = p.font();
+        scoreFont.setPixelSize(static_cast<int>(rect.height() * 0.30));
+        scoreFont.setWeight(QFont::Black);
+        p.setFont(scoreFont);
+        p.setPen(QColor(Theme::Color::textPrimary));
+        p.drawText(textRect, Qt::AlignHCenter | Qt::AlignTop,
+                    QString::number(m_score));
+
+        QFont scaleFont = p.font();
+        scaleFont.setPixelSize(static_cast<int>(rect.height() * 0.09));
+        scaleFont.setWeight(QFont::Medium);
+        p.setFont(scaleFont);
+        p.setPen(QColor(Theme::Color::textSecondary));
+        const QRectF scaleRect(rect.left(),
+                                rect.top() + rect.height() * 0.62,
+                                rect.width(),
+                                rect.height() * 0.12);
+        p.drawText(scaleRect, Qt::AlignHCenter | Qt::AlignTop, "/ 100");
+    }
+
+private:
+    static QColor scoreColor(int score) {
+        // Three-tier ramp aligned with the SecurityScoreCard label colors:
+        //   ≥ 80 → green   (Safe)
+        //   50–79 → yellow (Moderate)
+        //   < 50  → red    (Critical)
+        if (score >= 80) return QColor(Theme::Color::severitySafe);
+        if (score >= 50) return QColor(Theme::Color::severityMedium);
+        return QColor(Theme::Color::severityCritical);
+    }
+
+    int m_score = 0;
+};
+
+// ---------------------------------------------------------------------------
+// SecurityScoreCard
+// ---------------------------------------------------------------------------
+SecurityScoreCard::SecurityScoreCard(QWidget* parent)
+    : QFrame(parent)
+{
+    setObjectName("OdySecurityScore");
+    setAttribute(Qt::WA_StyledBackground, true);
+    setStyleSheet(QString(
+        "QFrame#OdySecurityScore {"
+        "  background-color: %1;"
+        "  border: 1px solid %2;"
+        "  border-radius: %3px;"
+        "}"
+    ).arg(Theme::Color::bgCard, Theme::Color::borderSubtle)
+     .arg(Theme::Size::cardRadius));
+
+    auto* v = new QVBoxLayout(this);
+    v->setContentsMargins(20, 16, 20, 16);
+    v->setSpacing(8);
+
+    auto* title = new QLabel("System Security Score", this);
+    title->setStyleSheet(QString(
+        "color: %1; font-size: 16px; font-weight: 700;")
+            .arg(Theme::Color::textPrimary));
+    v->addWidget(title);
+
+    // ── Gauge (the score number is now drawn inside the arc) ───────────
+    m_gauge = new ScoreGauge(this);
+    v->addWidget(m_gauge, 0, Qt::AlignHCenter);
+
+    // m_scoreText kept for API compatibility — hidden because the gauge
+    // already shows the number. Removing the field would mean touching
+    // every refresh path that references it.
+    m_scoreText = new QLabel("", this);
+    m_scoreText->setVisible(false);
+
+    m_label = new QLabel("—", this);
+    m_label->setAlignment(Qt::AlignHCenter);
+    m_label->setStyleSheet(QString(
+        "color: %1; font-size: 14px; font-weight: 600;")
+            .arg(Theme::Color::severitySafe));
+    v->addWidget(m_label);
+
+    m_subtitle = new QLabel("", this);
+    m_subtitle->setAlignment(Qt::AlignHCenter);
+    m_subtitle->setWordWrap(true);
+    m_subtitle->setStyleSheet(QString(
+        "color: %1; font-size: 11px;").arg(Theme::Color::textSecondary));
+    v->addWidget(m_subtitle);
+
+    // ── 7-day trend chart ───────────────────────────────────────────────
+    m_chart = new QChart();
+    m_chart->setBackgroundBrush(Qt::transparent);
+    m_chart->setBackgroundPen(Qt::NoPen);
+    m_chart->setMargins({0, 0, 0, 0});
+    m_chart->legend()->hide();
+    m_chart->setBackgroundRoundness(0);
+
+    m_series = new QLineSeries(m_chart);
+    // Brace initialization — avoids the "most vexing parse" where
+    //   QPen pen(QColor(...));
+    // would be interpreted as a function declaration named `pen`.
+    QPen pen{QColor(Theme::Color::severitySafe)};
+    pen.setWidthF(2.5);
+    m_series->setPen(pen);
+    m_chart->addSeries(m_series);
+
+    auto* axisX = new QValueAxis();
+    auto* axisY = new QValueAxis();
+    axisX->setRange(0, 6);
+    axisY->setRange(0, 100);
+    axisX->setVisible(false);
+    axisY->setVisible(false);
+    m_chart->addAxis(axisX, Qt::AlignBottom);
+    m_chart->addAxis(axisY, Qt::AlignLeft);
+    m_series->attachAxis(axisX);
+    m_series->attachAxis(axisY);
+
+    m_chartView = new QChartView(m_chart, this);
+    m_chartView->setRenderHint(QPainter::Antialiasing, true);
+    m_chartView->setStyleSheet("background: transparent;");
+    m_chartView->setFrameShape(QFrame::NoFrame);
+    m_chartView->setFixedHeight(60);
+    v->addWidget(m_chartView);
+
+    setScore(0);
+}
+
+void SecurityScoreCard::setScore(int score)
+{
+    score = qBound(0, score, 100);
+    if (m_gauge) m_gauge->setScore(score);
+    m_scoreText->setText(QString::number(score));
+
+    // Stabilization C — three-tier color scale per the spec:
+    //   ≥ 80 → Green (Safe)
+    //   50–79 → Yellow (Moderate)
+    //   < 50 → Red (Critical)
+    QString label, color, subtitle;
+    if (score >= 90) {
+        label = "Excellent";  color = Theme::Color::severitySafe;
+        subtitle = "Your system is well protected.\nKeep up the good work!";
+    } else if (score >= 80) {
+        label = "Good"; color = Theme::Color::severitySafe;
+        subtitle = "System is secure — a few items worth reviewing.";
+    } else if (score >= 50) {
+        label = "Moderate"; color = Theme::Color::severityMedium;
+        subtitle = "Some findings need attention.";
+    } else {
+        label = "Critical"; color = Theme::Color::severityCritical;
+        subtitle = "Immediate action recommended.";
+    }
+    m_label->setText(label);
+    m_label->setStyleSheet(QString(
+        "color: %1; font-size: 14px; font-weight: 600;").arg(color));
+    m_subtitle->setText(subtitle);
+}
+
+void SecurityScoreCard::setTrend(const QVector<int>& trend)
+{
+    rebuildTrend(trend);
+}
+
+void SecurityScoreCard::rebuildTrend(const QVector<int>& trend)
+{
+    m_series->clear();
+    QVector<int> t = trend;
+    while (t.size() < 7) t.append(t.isEmpty() ? 0 : t.last());
+    if (t.size() > 7) t = t.mid(t.size() - 7);
+    for (int i = 0; i < t.size(); ++i)
+        m_series->append(i, t[i]);
+}
+
+#include "SecurityScoreCard.moc"

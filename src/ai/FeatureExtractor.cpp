@@ -47,6 +47,18 @@ static float shannonEntropy(const uint8_t* data, size_t len)
 
 /// Read the entire file into a byte vector.  Returns empty on failure or
 /// if the file exceeds 200 MB.
+///
+/// Phase 1 reliability fix:
+///   The previous version returned `buf` even on partial reads, leaving
+///   uninitialized bytes past the read point that the entropy / byte-stat
+///   passes interpreted as data. This caused noisy false positives on
+///   files that hit a permission boundary mid-read (network mounts,
+///   in-flight downloads, files truncated between fstat and read).
+///
+///   Now we:
+///     1. Resize the buffer to exactly the bytes successfully read.
+///     2. Return empty if zero bytes read or stream errored.
+///     3. Cap at 200 MB the same way the hash pass does.
 static std::vector<uint8_t> readFileBytes(const std::string& path)
 {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -58,6 +70,15 @@ static std::vector<uint8_t> readFileBytes(const std::string& path)
     std::vector<uint8_t> buf(static_cast<size_t>(size));
     f.seekg(0, std::ios::beg);
     f.read(reinterpret_cast<char*>(buf.data()), size);
+
+    // Number of bytes actually transferred. With ifstream::read this is
+    // gcount(); it can be < size on permission errors, truncation, or
+    // network-mount failures mid-read.
+    const std::streamsize got = f.gcount();
+    if (got <= 0)            return {};   // nothing read — treat as failure
+    if (got < size)          buf.resize(static_cast<size_t>(got));   // truncate uninit tail
+    if (f.bad())             return {};   // hard I/O error
+
     return buf;
 }
 
