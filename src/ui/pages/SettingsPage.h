@@ -9,6 +9,7 @@
 // ============================================================================
 
 #include <QWidget>
+#include <QMessageBox>
 
 class ToggleRow;
 class QPushButton;
@@ -19,6 +20,7 @@ class SettingsPage : public QWidget
     Q_OBJECT
 public:
     explicit SettingsPage(QWidget* parent = nullptr);
+    bool clearAllData();
 
     /// Re-read every toggle from the live ScannerConfig. Call after
     /// programmatic config changes (e.g. user edited the JSON file
@@ -28,11 +30,13 @@ public:
 signals:
     /// Emitted after a successful Save.
     void configSaved();
+    void clearCacheRequested();
 
 private slots:
     void onSaveClicked();
     void onResetClicked();
     void markDirty(bool /*ignored*/);
+    void onClearCacheClicked();
 
 private:
     void buildUi();

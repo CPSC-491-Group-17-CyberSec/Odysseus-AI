@@ -40,6 +40,82 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QTimer>
+#include <QApplication>
+#include <QPainter>
+#include <QStyleOption>
+// #include <QStandardPaths>
+
+class CacheOverlay : public QWidget {
+public:
+    CacheOverlay(QWidget* parent, std::function<void()> onConfirm) : QWidget(parent) {
+        resize(parent->size()); // Cover the whole page
+        
+        // Semi-transparent dark background
+        setStyleSheet("CacheOverlay { background-color: rgba(0, 0, 0, 180); }");
+        
+        // The inner dialog box
+        QFrame* dialog = new QFrame(this);
+        dialog->setStyleSheet("QFrame { background-color: #1E1E1E; border-radius: 8px; border: 1px solid #333333; }");
+        dialog->setFixedSize(400, 180);
+        
+        QVBoxLayout* lay = new QVBoxLayout(dialog);
+        lay->setContentsMargins(24, 24, 24, 24);
+        lay->setSpacing(12);
+        
+        QLabel* title = new QLabel("Clear Cache", dialog);
+        title->setStyleSheet("color: #FFFFFF; font-size: 18px; font-weight: bold; background: transparent; border: none;");
+        
+        QLabel* desc = new QLabel("Are you sure you want to clear the cache?\n\nThis action cannot be undone.", dialog);
+        desc->setStyleSheet("color: #A0A0A0; font-size: 14px; background: transparent; border: none;");
+        desc->setWordWrap(true);
+        
+        QHBoxLayout* btnLay = new QHBoxLayout();
+        
+        QPushButton* cancelBtn = new QPushButton("Cancel", dialog);
+        cancelBtn->setCursor(Qt::PointingHandCursor);
+        cancelBtn->setStyleSheet("QPushButton { background-color: #333333; color: white; padding: 8px 16px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #444444; }");
+        
+        QPushButton* yesBtn = new QPushButton("Clear Cache", dialog);
+        yesBtn->setCursor(Qt::PointingHandCursor);
+        yesBtn->setStyleSheet("QPushButton { background-color: #D32F2F; color: white; padding: 8px 16px; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #F44336; }");
+        
+        btnLay->addStretch();
+        btnLay->addWidget(cancelBtn);
+        btnLay->addWidget(yesBtn);
+        
+        lay->addWidget(title);
+        lay->addWidget(desc);
+        lay->addStretch();
+        lay->addLayout(btnLay);
+        
+        // Destroy overlay on cancel
+        connect(cancelBtn, &QPushButton::clicked, this, &QWidget::deleteLater);
+        
+        // Execute lambda and destroy overlay on confirm
+        connect(yesBtn, &QPushButton::clicked, this, [this, onConfirm]() {
+            onConfirm();
+            this->deleteLater();
+        });
+    }
+
+protected:
+    // Required to render background colors properly on custom QWidgets
+    void paintEvent(QPaintEvent* event) override {
+        QStyleOption opt;
+        opt.initFrom(this);
+        QPainter p(this);
+        style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
+    }
+    
+    // Ensure the overlay and box stay centered if the user resizes the app
+    void resizeEvent(QResizeEvent* event) override {
+        if (parentWidget()) resize(parentWidget()->size());
+        QFrame* dialog = findChild<QFrame*>();
+        if (dialog) {
+            dialog->move((width() - dialog->width()) / 2, (height() - dialog->height()) / 2);
+        }
+    }
+};
 
 namespace {
 
@@ -198,6 +274,38 @@ void SettingsPage::buildUi()
         m_verboseLogging = new ToggleRow("Verbose Logging",
             "Detailed per-file pipeline traces. Noisy on real scans — turn on for debugging.");
         appendToggle(sec, m_verboseLogging);
+    }
+
+    // ── Data & Storage ─────────────────────────────────────────────────
+    {
+        QVBoxLayout* sec = nullptr;
+        // Use your app's native card builder so the header perfectly matches the others
+        main->addWidget(makeSectionCard("Data & Storage", content, &sec));
+
+        QPushButton* clearCacheBtn = new QPushButton("Clear Cache", content);
+        clearCacheBtn->setCursor(Qt::PointingHandCursor);
+        
+        // Style it to match your other outline buttons, turning red on hover
+        clearCacheBtn->setStyleSheet(QString(
+            "QPushButton {"
+            "  background: transparent; color: %1;"
+            "  border: 1px solid %2; border-radius: 8px;"
+            "  padding: 8px 16px; margin-bottom: 8px; %3"
+            "}"
+            "QPushButton:hover { background-color: %4; color: white; border-color: %4; }"
+        ).arg(Theme::Color::textSecondary,
+              Theme::Color::borderSubtle,
+              Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi),
+              Theme::Color::severityCritical));
+
+        connect(clearCacheBtn, &QPushButton::clicked, this, &SettingsPage::onClearCacheClicked);
+
+        // Wrap the button in an HBoxLayout so it aligns left and doesn't stretch 100% width
+        QHBoxLayout* btnLay = new QHBoxLayout();
+        btnLay->addWidget(clearCacheBtn);
+        btnLay->addStretch();
+
+        sec->addLayout(btnLay);
     }
 
     // ── Footer: config path + actions ──────────────────────────────────
@@ -393,4 +501,25 @@ void SettingsPage::onResetClicked()
     QTimer::singleShot(2500, this, [this]() {
         if (!m_dirty) m_status->setText("");
     });
+}
+
+void SettingsPage::onClearCacheClicked()
+{
+    // QString roaming = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    // QString local = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    
+    // QMessageBox::information(this, "Database Finder", 
+    //     "Your active database is inside one of these folders:\n\n"
+    //     "ROAMING:\n" + roaming + "\n\n"
+    //     "LOCAL:\n" + local);
+
+    CacheOverlay* overlay = new CacheOverlay(this, [this]() {
+        emit clearCacheRequested();
+        
+        m_status->setStyleSheet(QString("QLabel { color: %1; background: transparent; }")
+                                .arg(Theme::Color::severityLow));
+        m_status->setText(QString::fromUtf8("\xE2\x9C\x93 Cache cleared"));
+    });
+    
+    overlay->show();
 }

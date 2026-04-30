@@ -303,6 +303,14 @@ void MainWindow::setupShell()
     // Page 7 — SETTINGS: bound to ScannerConfigStore.
     auto* settings = new SettingsPage();
     m_pageStack->insertWidget(PageSettings, settings);
+    // Hook up the Clear Cache button using the local 'settings' variable
+    connect(settings, &SettingsPage::clearCacheRequested, this, [this]() {
+        if (m_db) {
+            m_db->clearAllData(); 
+            // Update the UI immediately so the user doesn't have to restart to see changes
+            qDebug() << "MainWindow: Database and cache successfully cleared.";
+        }
+    });
 
     // ── Phase 4 Step 3 + Stabilization A —————————————————————————————
     // The page stack and the right-side ThreatDetailPanel live inside a

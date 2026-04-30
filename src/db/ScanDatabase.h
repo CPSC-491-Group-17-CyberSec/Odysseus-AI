@@ -44,6 +44,7 @@ class ScanDatabase : public QObject
     Q_OBJECT
 
 public:
+
     // -------------------------------------------------------------------------
     // Construction / destruction
     // -------------------------------------------------------------------------
@@ -90,6 +91,9 @@ public:
 
     // Full path to the SQLite file (useful for diagnostics).
     QString databasePath() const { return m_dbPath; }
+
+    // Clears all historical scans, findings, and cached items
+    bool clearAllData();
 
 signals:
     // Emitted on the UI thread once a saveScanRecord() write has committed.

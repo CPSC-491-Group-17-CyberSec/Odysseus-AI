@@ -819,3 +819,37 @@ void ScanDatabase::WriterThread::run()
     sqlite3_close(db);
     qDebug() << "ScanDatabase WriterThread: stopped.";
 }
+
+bool ScanDatabase::clearAllData()
+{
+    if (m_dbPath.isEmpty()) return false;
+
+    sqlite3* db;
+    // Open connection solely for the wipe operation
+    if (sqlite3_open_v2(m_dbPath.toUtf8().constData(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+        qWarning() << "Failed to open DB for clearing:" << sqlite3_errmsg(db);
+        return false;
+    }
+
+    // Safely clear the data while maintaining schema
+    const char* queries[] = {
+        "DELETE FROM scans;",
+        "DELETE FROM scan_findings;",
+        "DELETE FROM scan_cache;",
+        "DELETE FROM scan_state;",
+        "VACUUM;"
+    };
+
+    bool success = true;
+    for (const char* query : queries) {
+        char* errMsg = nullptr;
+        if (sqlite3_exec(db, query, nullptr, nullptr, &errMsg) != SQLITE_OK) {
+            qWarning() << "Clear cache query failed:" << errMsg;
+            sqlite3_free(errMsg);
+            success = false;
+        }
+    }
+
+    sqlite3_close(db);
+    return success;
+}
