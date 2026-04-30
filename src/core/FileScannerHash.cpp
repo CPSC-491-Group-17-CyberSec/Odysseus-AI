@@ -20,6 +20,8 @@
 
 #include "FileScanner.h"
 
+#include <atomic>
+
 #include "reputation/ReputationDB.h"
 #include "reputation/CodeSigning.h"
 #include "core/ScannerConfig.h"
@@ -123,13 +125,14 @@ static QString hashFileSha256(const QString& filePath, qint64 fileSize)
     }
     if (!readOk || fileSize < mmapThreshold) {
         f.seek(0);
-        char   buf[65536];
+        // P3: thread_local buffer — allocated once per worker thread, reused across files.
+        static thread_local QByteArray buf(256 * 1024, Qt::Uninitialized);
         qint64 totalRead = 0;
         while (!f.atEnd()) {
-            const qint64 n = f.read(buf, sizeof(buf));
+            const qint64 n = f.read(buf.data(), buf.size());
             if (n < 0) { f.close(); return {}; }   // hard I/O error
             if (n == 0) break;
-            hasher.addData(QByteArrayView(buf, static_cast<qsizetype>(n)));
+            hasher.addData(QByteArrayView(buf.constData(), static_cast<qsizetype>(n)));
             totalRead += n;
         }
         // Partial read = corrupt/permission-denied mid-file = abort.
@@ -153,7 +156,8 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
                                      const QString& ext,
                                      qint64         fileSize,
                                      QString&       outReason,
-                                     QString&       outCategory) const
+                                     QString&       outCategory,
+                                     QString&       outSha256) const
 {
     if (m_noHashExtensions.contains(ext))
         return false;
@@ -167,6 +171,9 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
     const QString hex = hashFileSha256(filePath, fileSize);
     if (hex.isEmpty())
         return false;
+
+    // P2: always expose the computed hash so callers avoid recomputing it.
+    outSha256 = hex;
 
     const auto it = m_hashDb.constFind(hex);
     if (it != m_hashDb.constEnd()) {
@@ -206,7 +213,24 @@ QString hashFileForOdysseus(const QString& filePath, qint64 fileSize)
 // ============================================================================
 void FileScannerWorker::runHashWorker()
 {
+    // P4: snapshot config + reputation handle once before the loop.
+    // Both ScannerConfigStore::current() and odysseus_getReputationDB() acquire
+    // a mutex; calling them per-file causes contention across 4 worker threads.
+    const ScannerConfig cfg = ScannerConfigStore::current();
+    ReputationDB* rep       = odysseus_getReputationDB();
+
     QVector<CacheEntry> localCache;
+    localCache.reserve(256);
+
+    auto flushLocalCache = [&]() {
+        if (localCache.isEmpty()) return;
+        QMutexLocker lock(&m_cacheMutex);
+        m_sharedCacheUpdates.reserve(m_sharedCacheUpdates.size() + localCache.size());
+        for (auto& e : localCache)
+            m_sharedCacheUpdates.append(std::move(e));
+        localCache.clear();
+        localCache.reserve(256);
+    };
 
     for (;;) {
         FileWorkItem item;
@@ -216,7 +240,7 @@ void FileScannerWorker::runHashWorker()
 
             // Wait until there's work, enumeration is done, or scan cancelled.
             while (m_workQueue.isEmpty()
-                   && !m_enumDone
+                   && !m_enumDone.load(std::memory_order_acquire)
                    && m_cancelFlag->loadRelaxed() == 0)
             {
                 m_workHasItems.wait(&m_workMutex);
@@ -240,15 +264,17 @@ void FileScannerWorker::runHashWorker()
         m_cacheMisses.fetchAndAddRelaxed(1);
 
         QString reason, category;
-        bool flagged = false;
-        SuspiciousFile sf;  // pre-allocate; downstream passes populate fields
+        bool    flagged  = false;
+        QString sha256;           // P2: populated by checkByHash even on miss
+        SuspiciousFile sf;        // pre-allocate; downstream passes populate fields
 
         // --- Detection pass 1: known-hash lookup ---
-        if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category)) {
+        if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category, sha256)) {
             flagged = true;
+            sf.sha256              = sha256;   // already computed by checkByHash
             sf.classificationLevel = "Critical";
             sf.severityLevel       = "CRITICAL";
-            sf.confidencePct       = 100.0f;     // hash hit = exact match
+            sf.confidencePct       = 100.0f;   // hash hit = exact match
         }
         // --- Detection pass 2: YARA rule matching ---
         else if (checkByYara(item.filePath, item.fileSize, reason, category, &sf)) {
@@ -259,7 +285,6 @@ void FileScannerWorker::runHashWorker()
         else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
             flagged = true;
             // Map anomalyScore (0.0-1.0) → confidence percentage.
-            // The score is post-calibration; treat ≥ threshold as ≥ 50%.
             const float thr = (sf.anomalyThreshold > 0.0f) ? sf.anomalyThreshold : 0.5f;
             const float adj = (sf.anomalyScore - thr) / std::max(0.001f, 1.0f - thr);
             sf.confidencePct = std::clamp(50.0f + 50.0f * adj, 5.0f, 99.0f);
@@ -271,74 +296,64 @@ void FileScannerWorker::runHashWorker()
             sf.reason       = reason;
             sf.category     = category;
             sf.sizeBytes    = item.fileSize;
-            sf.lastModified = QDateTime::fromString(item.lastModified, Qt::ISODate);
+            // P5: convert epoch ms, not ISO string
+            sf.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs);
 
-            // ── Compute SHA-256 once for the SuspiciousFile (if not exempt) ─
-            // checkByHash already hashed for matching; recompute lazily here
-            // for YARA/AI flagged files that may have skipped the hash pass.
-            if (sf.sha256.isEmpty()
-                && !m_noHashExtensions.contains(item.ext)
-                && !m_ctx.isNetworkFs)
-            {
-                sf.sha256 = hashFileForOdysseus(item.filePath, item.fileSize);
+            // P2: reuse hash already computed by checkByHash on the hash pass;
+            // only call hashFileForOdysseus for YARA/AI flagged files where
+            // checkByHash didn't run or was skipped (exempt ext / network FS).
+            if (sf.sha256.isEmpty()) {
+                if (!sha256.isEmpty())
+                    sf.sha256 = sha256;  // reuse from hash pass (no match, but computed)
+                else if (!m_noHashExtensions.contains(item.ext) && !m_ctx.isNetworkFs)
+                    sf.sha256 = hashFileForOdysseus(item.filePath, item.fileSize);
             }
 
             // ── Reputation DB enrichment ────────────────────────────────
-            // Look up the SHA-256 in the reputation table; record a sighting
-            // (prevalence++) if known.  When config.reputationAutoUpsert is
-            // true, also persist new flagged hashes for future scans.
-            const ScannerConfig& cfg = ScannerConfigStore::current();
-
-            if (ReputationDB* rep = odysseus_getReputationDB()) {
-                if (!sf.sha256.isEmpty()) {
-                    ReputationRecord rr = rep->lookup(sf.sha256);
-                    if (rr.isKnown()) {
-                        sf.reputationFamily     = rr.family;
-                        sf.reputationSource     = rr.source;
-                        sf.reputationPrevalence = rr.prevalence;
-                        sf.signingStatus        = rr.signingStatus;
-                        sf.signerId             = rr.signerId;
-                        // Sighting bump always runs — it just increments
-                        // counters on a row that already exists.
-                        rep->recordSighting(sf.sha256);
-                    } else if (cfg.reputationAutoUpsert) {
-                        // New flagged file: persist what we know so future
-                        // scans recognize it without re-running YARA/AI.
-                        ReputationRecord newRec;
-                        newRec.sha256   = sf.sha256;
-                        newRec.family   = !sf.yaraFamily.isEmpty()
-                                              ? sf.yaraFamily
-                                              : QStringLiteral("Unknown/AI-flagged");
-                        newRec.source   = !sf.yaraMatches.isEmpty()
-                                              ? QStringLiteral("YARA/local")
-                                              : QStringLiteral("AI/local");
-                        newRec.severity = severityFromText(sf.severityLevel);
-                        rep->upsert(newRec);
-                        if (cfg.verboseLogging) {
-                            qDebug().noquote()
-                                << "[Reputation] upserted new flagged hash"
-                                << sf.sha256.left(12) + "..."
-                                << "(family:" << newRec.family << ")";
-                        }
+            if (rep && !sf.sha256.isEmpty()) {
+                ReputationRecord rr = rep->lookup(sf.sha256);
+                if (rr.isKnown()) {
+                    sf.reputationFamily     = rr.family;
+                    sf.reputationSource     = rr.source;
+                    sf.reputationPrevalence = rr.prevalence;
+                    sf.signingStatus        = rr.signingStatus;
+                    sf.signerId             = rr.signerId;
+                    rep->recordSighting(sf.sha256);
+                } else if (cfg.reputationAutoUpsert) {
+                    ReputationRecord newRec;
+                    newRec.sha256   = sf.sha256;
+                    newRec.family   = !sf.yaraFamily.isEmpty()
+                                          ? sf.yaraFamily
+                                          : QStringLiteral("Unknown/AI-flagged");
+                    newRec.source   = !sf.yaraMatches.isEmpty()
+                                          ? QStringLiteral("YARA/local")
+                                          : QStringLiteral("AI/local");
+                    newRec.severity = severityFromText(sf.severityLevel);
+                    rep->upsert(newRec);
+                    if (cfg.verboseLogging) {
+                        qDebug().noquote()
+                            << "[Reputation] upserted new flagged hash"
+                            << sf.sha256.left(12) + "..."
+                            << "(family:" << newRec.family << ")";
                     }
                 }
+            }
 
-                // ── Code-signing check (gated by config) ──
-                if (cfg.codeSigningEnabled
-                    && sf.signingStatus < 0
-                    && !sf.sha256.isEmpty())
-                {
-                    CodeSigning::Result cs = CodeSigning::verifyFile(item.filePath);
-                    sf.signingStatus = CodeSigning::statusToInt(cs.status);
-                    sf.signerId      = cs.signerId;
+            // ── Code-signing check (gated by config) ──
+            if (rep && cfg.codeSigningEnabled
+                && sf.signingStatus < 0
+                && !sf.sha256.isEmpty())
+            {
+                CodeSigning::Result cs = CodeSigning::verifyFile(item.filePath);
+                sf.signingStatus = CodeSigning::statusToInt(cs.status);
+                sf.signerId      = cs.signerId;
 
-                    if (cfg.reputationAutoUpsert) {
-                        ReputationRecord upd;
-                        upd.sha256        = sf.sha256;
-                        upd.signingStatus = sf.signingStatus;
-                        upd.signerId      = sf.signerId;
-                        rep->upsert(upd);
-                    }
+                if (cfg.reputationAutoUpsert) {
+                    ReputationRecord upd;
+                    upd.sha256        = sf.sha256;
+                    upd.signingStatus = sf.signingStatus;
+                    upd.signerId      = sf.signerId;
+                    rep->upsert(upd);
                 }
             }
 
@@ -349,7 +364,9 @@ void FileScannerWorker::runHashWorker()
             // Cache the flagged result so subsequent scans can replay it.
             CacheEntry ce;
             ce.filePath            = item.filePath;
-            ce.lastModified        = item.lastModified;
+            ce.lastModifiedMs      = item.lastModifiedMs;
+            ce.lastModified        = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs)
+                                         .toString(Qt::ISODate);
             ce.fileSize            = item.fileSize;
             ce.isFlagged           = true;
             ce.reason              = reason;
@@ -362,7 +379,6 @@ void FileScannerWorker::runHashWorker()
             ce.recommendedActions  = sf.recommendedActions;
             ce.aiExplanation       = sf.aiExplanation;
             ce.llmAvailable        = sf.llmAvailable;
-            // Phase 1 cache fields
             ce.sha256              = sf.sha256;
             ce.yaraMatches         = sf.yaraMatches;
             ce.yaraFamily          = sf.yaraFamily;
@@ -377,17 +393,21 @@ void FileScannerWorker::runHashWorker()
         } else {
             // File is clean – record for incremental-scan cache.
             CacheEntry ce;
-            ce.filePath     = item.filePath;
-            ce.lastModified = item.lastModified;
-            ce.fileSize     = item.fileSize;
-            ce.isFlagged    = false;
+            ce.filePath       = item.filePath;
+            ce.lastModifiedMs = item.lastModifiedMs;
+            ce.lastModified   = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs)
+                                    .toString(Qt::ISODate);
+            ce.fileSize       = item.fileSize;
+            ce.isFlagged      = false;
             localCache.append(std::move(ce));
         }
+
+        // P7: flush local cache in batches to limit per-worker memory growth
+        // and reduce the cost of the final merge lock.
+        if (localCache.size() >= 500)
+            flushLocalCache();
     }
 
-    // Merge this worker's clean-file entries into the shared buffer.
-    if (!localCache.isEmpty()) {
-        QMutexLocker lock(&m_cacheMutex);
-        m_sharedCacheUpdates.append(std::move(localCache));
-    }
+    // Final flush – remaining entries not yet merged.
+    flushLocalCache();
 }

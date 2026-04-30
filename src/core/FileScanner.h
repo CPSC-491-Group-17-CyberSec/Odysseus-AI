@@ -13,6 +13,8 @@
 #include <QMutex>
 #include <QWaitCondition>
 
+#include <atomic>
+
 // Forward-declare for checkByAI / checkByYara parameter
 struct SuspiciousFile;
 
@@ -104,7 +106,8 @@ struct ScanRecord
 struct CacheEntry
 {
     QString filePath;
-    QString lastModified;   // Qt::ISODate string – matches QFileInfo::lastModified()
+    QString lastModified;      // Qt::ISODate string (for DB persistence)
+    qint64  lastModifiedMs = 0; // epoch ms (derived on load; used for fast comparison)
     qint64  fileSize = 0;
     bool    isFlagged = false;
 
@@ -159,7 +162,7 @@ struct FileWorkItem
     QString filePath;
     QString ext;
     qint64  fileSize;
-    QString lastModified;   // Qt::ISODate
+    qint64  lastModifiedMs;   // epoch ms – avoids QDateTime::toString() per file
 };
 
 // ---------------------------------------------------------------------------
@@ -197,7 +200,8 @@ private:
                      const QString& ext,
                      qint64         fileSize,
                      QString&       outReason,
-                     QString&       outCategory) const;
+                     QString&       outCategory,
+                     QString&       outSha256) const;   // always populated when hash is computed
 
     // ----- Hash worker (called by N QThread::create threads) -----
     void runHashWorker();
@@ -229,7 +233,7 @@ private:
     QWaitCondition       m_workHasItems;   // wakes consumers when queue gains items
     QWaitCondition       m_workHasSpace;   // wakes producer when queue drains below max
     QQueue<FileWorkItem> m_workQueue;
-    bool                 m_enumDone = false;    // set when enumeration finishes
+    std::atomic<bool>    m_enumDone{false};   // S1: atomic — read by worker threads without lock
 
     // ----- Shared accumulators (written by hash workers) -----
     QAtomicInt              m_totalScanned{0};

@@ -553,6 +553,9 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
         CacheEntry e;
         e.filePath     = colText(0);
         e.lastModified = colText(1);
+        // P5: pre-compute epoch ms so the enumerator can do integer comparisons.
+        e.lastModifiedMs = QDateTime::fromString(e.lastModified, Qt::ISODate)
+                               .toMSecsSinceEpoch();
         e.fileSize     = sqlite3_column_int64(stmt, 2);
         e.isFlagged    = (colText(3) == QStringLiteral("flagged"));
 

@@ -20,6 +20,7 @@
 #include "FileScanner.h"
 
 #include <QDirIterator>
+#include <atomic>
 #include <QFileInfo>
 #include <QDir>
 #include <QElapsedTimer>
@@ -59,7 +60,7 @@ void FileScannerWorker::doScan()
     m_bytesScanned.storeRelaxed(0);
     m_cacheHits.storeRelaxed(0);
     m_cacheMisses.storeRelaxed(0);
-    m_enumDone = false;
+    m_enumDone.store(false, std::memory_order_relaxed);
     m_sharedCacheUpdates.clear();
 
     // ------------------------------------------------------------------
@@ -79,9 +80,8 @@ void FileScannerWorker::doScan()
     // ------------------------------------------------------------------
     // Enumeration phase (runs on this thread, i.e. the worker QThread).
     // ------------------------------------------------------------------
-    const int targetDirs   = 500;
-    int       dirCount     = 0;
-    int       lastProgress = 0;
+    int dirCount     = 0;
+    int lastProgress = 0;
 
     QDirIterator it(
         m_rootPath,
@@ -89,7 +89,11 @@ void FileScannerWorker::doScan()
         QDirIterator::Subdirectories   // NO FollowSymlinks – avoids loops
     );
 
+    // P1: cache per-directory state so toLower() + shouldSkipDirectory()
+    // are called once per directory, not once per file.
     QString lastDir;
+    QString lastLowerDir;
+    bool    lastShouldSkip = false;
 
     // Resume support: if m_resumeFromDir is set, skip everything before it.
     // Comparison is lexicographic on the absolute path – QDirIterator
@@ -103,47 +107,51 @@ void FileScannerWorker::doScan()
         it.next();
         const QFileInfo fi = it.fileInfo();
 
-        const QString absPath  = fi.absoluteFilePath();
-        const QString dirPath  = fi.absolutePath();
-        const QString lowerDir = dirPath.toLower();
+        const QString absPath = fi.absoluteFilePath();
+        const QString dirPath = fi.absolutePath();
 
-        if (shouldSkipDirectory(lowerDir))
-            continue;
-
-        // Progress + resume bookkeeping on directory change.
+        // P1: recompute expensive per-directory work only on dir change.
         if (dirPath != lastDir) {
-            lastDir = dirPath;
-            ++dirCount;
-            emit scanningPath(dirPath);
+            lastDir        = dirPath;
+            lastLowerDir   = dirPath.toLower();
+            lastShouldSkip = shouldSkipDirectory(lastLowerDir);
 
-            const int newProgress = qMin(95, (dirCount * 95) / targetDirs);
-            if (newProgress != lastProgress) {
-                lastProgress = newProgress;
-                emit progressUpdated(newProgress);
+            if (!lastShouldSkip) {
+                ++dirCount;
+                emit scanningPath(dirPath);
+
+                // P8: asymptotic progress curve – avoids hard-coded target count.
+                // Approaches 95% as dirCount grows; never stalls at 0% early on.
+                const int newProgress = static_cast<int>(95.0 * dirCount / (dirCount + 400.0));
+                if (newProgress != lastProgress) {
+                    lastProgress = newProgress;
+                    emit progressUpdated(newProgress);
+                }
             }
 
-            if (dirCount % 200 == 0)
-                QThread::yieldCurrentThread();
+            // P6: removed QThread::yieldCurrentThread() – the bounded work queue
+            // (m_workHasSpace) already yields the enumerator when workers fall behind.
 
             // Once we reach or pass the stored resume directory, start scanning.
             if (!pastResumePoint && dirPath >= m_resumeFromDir)
                 pastResumePoint = true;
         }
 
-        if (!pastResumePoint)
+        if (lastShouldSkip || !pastResumePoint)
             continue;
 
         // Always count bytes so the storage label reflects the traversal scope.
         m_bytesScanned.fetchAndAddRelaxed(fi.size());
 
-        const QString ext          = fi.suffix().toLower();
-        const QString lastModified = fi.lastModified().toString(Qt::ISODate);
+        const QString ext = fi.suffix().toLower();
+        // P5: epoch ms avoids QDateTime::toString(Qt::ISODate) on every file.
+        const qint64 lastModifiedMs = fi.lastModified().toMSecsSinceEpoch();
 
         // Cache hit: file unchanged since last scan – skip hashing/AI.
-        // Key: path + lastModified + fileSize must all match.
+        // Key: path + lastModifiedMs + fileSize must all match.
         const auto cacheIt = m_scanCache.constFind(absPath);
         if (cacheIt != m_scanCache.constEnd()
-            && cacheIt.value().lastModified == lastModified
+            && cacheIt.value().lastModifiedMs == lastModifiedMs   // P5: integer compare
             && cacheIt.value().fileSize == fi.size())
         {
             m_totalScanned.fetchAndAddRelaxed(1);
@@ -158,7 +166,7 @@ void FileScannerWorker::doScan()
                 sf.reason              = ce.reason;
                 sf.category            = ce.category;
                 sf.sizeBytes           = ce.fileSize;
-                sf.lastModified        = fi.lastModified();
+                sf.lastModified        = QDateTime::fromMSecsSinceEpoch(lastModifiedMs);
                 sf.classificationLevel = ce.classificationLevel;
                 sf.severityLevel       = ce.severityLevel;
                 sf.anomalyScore        = ce.anomalyScore;
@@ -195,7 +203,7 @@ void FileScannerWorker::doScan()
             }
             if (m_cancelFlag->loadRelaxed() != 0)
                 break;
-            m_workQueue.enqueue({ absPath, ext, fi.size(), lastModified });
+            m_workQueue.enqueue({ absPath, ext, fi.size(), lastModifiedMs });
             m_workHasItems.wakeOne();
         }
     }
@@ -206,7 +214,7 @@ void FileScannerWorker::doScan()
     // ------------------------------------------------------------------
     {
         QMutexLocker lock(&m_workMutex);
-        m_enumDone = true;
+        m_enumDone.store(true, std::memory_order_release);
         m_workHasItems.wakeAll();
     }
 
