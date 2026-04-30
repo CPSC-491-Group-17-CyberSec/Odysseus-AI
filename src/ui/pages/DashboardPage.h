@@ -20,8 +20,12 @@
 
 #include "../../core/FileScanner.h"   // SuspiciousFile, ScanRecord
 #include "../../../include/monitor/ProcessInfo.h"   // SystemSnapshot
+#include "../../../include/edr/AlertTypes.h"        // EDR::Alert
+#include "../../../include/edr/SecurityScoreEngine.h"
 #include <QWidget>
 #include <QVector>
+#include <QDateTime>
+#include <QHash>
 
 class StatCard;
 class DonutChart;
@@ -45,6 +49,22 @@ public:
                  bool                            scannerRunning,
                  const SystemSnapshot*           sysSnapshot = nullptr);
 
+    /// Update the EDR-Lite status card. Called from MainWindow whenever
+    /// the MonitoringService reports state changes (start/stop/tick).
+    void setEdrStatus(bool             enabled,
+                       const QDateTime& lastTick,
+                       int              alertCount);
+
+    /// Push a single EDR alert into the Recent Activity feed.
+    void appendEdrAlert(const EDR::Alert& alert);
+
+    /// Replace the security score with the risk-based report computed by
+    /// SecurityScoreEngine over MonitoringService::activeAlerts(). When
+    /// this is called the dashboard switches to the new "why this score"
+    /// breakdown — older callers using just refresh() still get the
+    /// legacy file-finding-based score.
+    void setSecurityReport(const EDR::ScoreReport& report);
+
 signals:
     void scanRequested(int scanType);
     void viewAllActivityClicked();
@@ -56,6 +76,7 @@ private:
     StatCard*         m_cardCritical = nullptr;
     StatCard*         m_cardSuspicious = nullptr;
     StatCard*         m_cardScanned  = nullptr;
+    StatCard*         m_cardEdr      = nullptr;       // Phase 4 — EDR-Lite
     ScanTypeSelector* m_scanSelector = nullptr;
     DonutChart*       m_donut        = nullptr;
     ActivityList*     m_activity     = nullptr;

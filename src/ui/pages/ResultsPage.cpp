@@ -8,6 +8,11 @@
 #include "../widgets/ThreatRow.h"
 #include "../widgets/DetailSection.h"
 
+// Phase 5 — Response & Control Layer
+#include "response/ResponseManagerSingleton.h"
+#include "response/ResponseManager.h"
+#include "response/ResponseTypes.h"
+
 #include <QLabel>
 #include <QPushButton>
 #include <QLineEdit>
@@ -21,6 +26,7 @@
 #include <QFileInfo>
 #include <QDateTime>
 #include <QRegularExpression>
+#include <QMessageBox>
 
 namespace {
 
@@ -471,8 +477,10 @@ void ResultsPage::buildUi()
 
     m_btnQuarantine = new QPushButton("Quarantine", m_detailPanel);
     m_btnQuarantine->setCursor(Qt::PointingHandCursor);
+    // Phase 5 — wired to ResponseManager. Button stays disabled until a
+    // finding is selected (populateDetail() enables it for File targets).
     m_btnQuarantine->setEnabled(false);
-    m_btnQuarantine->setToolTip("Coming soon");
+    m_btnQuarantine->setToolTip("Move file to quarantine (reversible)");
     m_btnQuarantine->setStyleSheet(QString(
         "QPushButton { background-color: %1; color: white; border: none;"
         " border-radius: 8px; padding: 10px 18px; %2 }"
@@ -484,6 +492,8 @@ void ResultsPage::buildUi()
     .arg(Theme::Color::accentBlueHover)
     .arg(Theme::Color::bgSecondary)
     .arg(Theme::Color::textMuted));
+    connect(m_btnQuarantine, &QPushButton::clicked,
+            this,            &ResultsPage::onQuarantineClicked);
     actions->addWidget(m_btnQuarantine, 1);
 
     auto styleSecondaryBtn = [](QPushButton* b) {
@@ -503,12 +513,24 @@ void ResultsPage::buildUi()
         .arg(Theme::Color::textMuted));
     };
 
+    // Delete is intentionally NOT wired — Phase 5 forbids destructive,
+    // non-reversible actions. Quarantine is the reversible substitute.
     m_btnDelete = new QPushButton("Delete", m_detailPanel);
     styleSecondaryBtn(m_btnDelete);
+    m_btnDelete->setToolTip(
+        "Disabled by design — use Quarantine (reversible) instead.");
     actions->addWidget(m_btnDelete, 1);
 
+    // Ignore = "Add to Allowlist" — wired to ResponseManager so the next
+    // scan suppresses this finding. Hash-based when SHA-256 is available,
+    // path-based otherwise.
     m_btnIgnore = new QPushButton("Ignore", m_detailPanel);
     styleSecondaryBtn(m_btnIgnore);
+    m_btnIgnore->setEnabled(false);
+    m_btnIgnore->setToolTip(
+        "Add this file to the allowlist (suppress future findings)");
+    connect(m_btnIgnore, &QPushButton::clicked,
+            this,        &ResultsPage::onIgnoreClicked);
     actions->addWidget(m_btnIgnore, 1);
 
     dp->addLayout(actions);
@@ -722,6 +744,13 @@ void ResultsPage::populateDetail(const SuspiciousFile& sf)
     setVis(m_btnIgnore,      true);
     if (m_detailSource) setVis(m_detailSource->parentWidget(), true);
 
+    // Phase 5 — enable wired action buttons now that we have a finding.
+    // The file path is the gating requirement (Quarantine + Allowlist need it).
+    const bool havePath = !sf.filePath.isEmpty();
+    if (m_btnQuarantine) m_btnQuarantine->setEnabled(havePath);
+    if (m_btnIgnore)     m_btnIgnore->setEnabled(havePath);
+    // Delete intentionally remains disabled — see button-construction comment.
+
     // Title
     m_detailTitle->setText(!sf.cveId.isEmpty() ? sf.cveId : sf.fileName);
 
@@ -830,5 +859,138 @@ void ResultsPage::populateDetail(const SuspiciousFile& sf)
     } else {
         m_secActions->setVisible(true);
         m_secActions->setBullets(sf.recommendedActions);
+    }
+}
+
+// ============================================================================
+//  Phase 5 — Response & Control Layer slots
+// ============================================================================
+void ResultsPage::onQuarantineClicked()
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= m_findings.size())
+        return;
+    const SuspiciousFile& sf = m_findings[m_selectedIndex];
+    if (sf.filePath.isEmpty()) {
+        QMessageBox::warning(this, "Quarantine",
+            "No file path available for this finding.");
+        return;
+    }
+
+    // Confirmation dialog — required for destructive/sensitive actions.
+    // The ResponseManager will reject the request without userConfirmed=true,
+    // so this dialog is the contract that lets the call succeed.
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle("Quarantine file");
+    box.setText(QString("Move this file to quarantine?"));
+    box.setInformativeText(QString(
+        "<b>%1</b><br><br>"
+        "<i>%2</i><br><br>"
+        "The file will be moved (not deleted) to the Odysseus quarantine "
+        "directory with read-only permissions. You can restore it later "
+        "from the quarantine page. This action will be recorded in the "
+        "action log.")
+            .arg(sf.fileName.toHtmlEscaped(),
+                 sf.filePath.toHtmlEscaped()));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    if (box.exec() != QMessageBox::Yes)
+        return;
+
+    // Build the request.
+    namespace R = odysseus::response;
+    R::ActionRequest req;
+    req.action               = R::ActionType::QuarantineFile;
+    req.userConfirmed        = true;          // dialog above is the consent
+    req.target.kind          = R::TargetKind::File;
+    req.target.path          = sf.filePath.toStdString();
+    req.target.sha256        = sf.sha256.toStdString();
+    req.target.label         = sf.fileName.toStdString();
+    req.target.sourceId      = sf.filePath.toStdString();   // stable per file
+    req.reason               = sf.reason.isEmpty()
+                                   ? std::string("User-initiated quarantine "
+                                                  "from Results page")
+                                   : sf.reason.toStdString();
+
+    R::ActionResult res = R::globalResponseManager().execute(req);
+
+    if (res.success) {
+        QMessageBox::information(this, "Quarantine",
+            QString("File quarantined successfully.\n\nMoved to:\n%1")
+                .arg(QString::fromStdString(res.newPath)));
+        // Disable the buttons so the user can't double-quarantine.
+        if (m_btnQuarantine) m_btnQuarantine->setEnabled(false);
+        if (m_btnIgnore)     m_btnIgnore->setEnabled(false);
+        // Mark the row as resolved in the visible list. The simplest
+        // way without restructuring is to update the local copy's reason
+        // and request a row rebuild on next selection.
+        m_findings[m_selectedIndex].reason =
+            QString("[QUARANTINED] ") + m_findings[m_selectedIndex].reason;
+    } else {
+        QMessageBox::critical(this, "Quarantine failed",
+            QString("Could not quarantine file.\n\n%1")
+                .arg(QString::fromStdString(
+                    res.errorMessage.empty() ? res.message
+                                              : res.errorMessage)));
+    }
+}
+
+void ResultsPage::onIgnoreClicked()
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= m_findings.size())
+        return;
+    const SuspiciousFile& sf = m_findings[m_selectedIndex];
+    if (sf.filePath.isEmpty()) {
+        QMessageBox::warning(this, "Ignore",
+            "No file path available for this finding.");
+        return;
+    }
+
+    // Confirmation — adding to the allowlist suppresses future findings
+    // for this file. We prefer SHA-256 entries when available.
+    const QString idLine = sf.sha256.isEmpty()
+        ? QString("Path: %1").arg(sf.filePath.toHtmlEscaped())
+        : QString("SHA-256: %1").arg(sf.sha256);
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle("Add to allowlist");
+    box.setText(QString("Suppress future findings for this file?"));
+    box.setInformativeText(QString(
+        "<b>%1</b><br><br>"
+        "%2<br><br>"
+        "Subsequent scans will not flag this file. You can remove the "
+        "entry later from the Settings page.")
+            .arg(sf.fileName.toHtmlEscaped(), idLine));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    if (box.exec() != QMessageBox::Yes)
+        return;
+
+    namespace R = odysseus::response;
+    R::ActionRequest req;
+    req.action          = R::ActionType::AddToAllowlist;
+    req.userConfirmed   = true;          // not strictly required for allowlist,
+                                          // but consistent and audited.
+    req.target.kind     = R::TargetKind::File;
+    req.target.path     = sf.filePath.toStdString();
+    req.target.sha256   = sf.sha256.toStdString();   // ResponseManager
+                                                       // prefers SHA-256
+    req.target.label    = sf.fileName.toStdString();
+    req.reason          = std::string("User-initiated ignore from Results page");
+
+    R::ActionResult res = R::globalResponseManager().execute(req);
+
+    if (res.success) {
+        QMessageBox::information(this, "Allowlisted",
+            QString("Added to allowlist.\n\n%1\n\n"
+                    "This file will not appear in future scan results.")
+                .arg(QString::fromStdString(res.message)));
+        if (m_btnIgnore) m_btnIgnore->setEnabled(false);
+    } else {
+        QMessageBox::critical(this, "Allowlist failed",
+            QString("Could not add to allowlist.\n\n%1")
+                .arg(QString::fromStdString(
+                    res.errorMessage.empty() ? res.message
+                                              : res.errorMessage)));
     }
 }

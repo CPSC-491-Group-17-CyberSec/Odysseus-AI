@@ -24,8 +24,9 @@
 
 #include "reputation/ReputationDB.h"
 #include "reputation/CodeSigning.h"
-#include "reputation/CodeSigning.h"
 #include "core/ScannerConfig.h"
+#include "response/ResponseManagerSingleton.h"   // Phase 5 — allowlist suppression
+#include "response/Allowlist.h"
 
 #include <QFile>
 #include <QFileInfo>
@@ -220,6 +221,11 @@ void FileScannerWorker::runHashWorker()
     const ScannerConfig cfg = ScannerConfigStore::current();
     ReputationDB* rep       = odysseus_getReputationDB();
 
+    // Phase 5 — process-wide Allowlist for suppression. Cheap pointer read;
+    // Allowlist itself is internally synchronized.
+    odysseus::response::Allowlist* allowlist =
+        odysseus::response::globalAllowlist();
+
     QVector<CacheEntry> localCache;
     localCache.reserve(256);
 
@@ -263,6 +269,24 @@ void FileScannerWorker::runHashWorker()
         // (these items were not served from cache – they need full analysis).
         m_totalScanned.fetchAndAddRelaxed(1);
         m_cacheMisses.fetchAndAddRelaxed(1);
+
+        // ── Phase 5: early Allowlist suppression (path-only) ─────────────
+        // Cheap escape path — avoids hashing/YARA/AI on user-allowlisted files.
+        // SHA-256 entries are matched after the hash pass below.
+        if (allowlist
+            && allowlist->isFileIgnored(item.filePath.toStdString(), {}))
+        {
+            CacheEntry ce;
+            ce.filePath       = item.filePath;
+            ce.lastModifiedMs = item.lastModifiedMs;
+            ce.lastModified   = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs)
+                                    .toString(Qt::ISODate);
+            ce.fileSize       = item.fileSize;
+            ce.isFlagged      = false;
+            localCache.append(std::move(ce));
+            if (localCache.size() >= 500) flushLocalCache();
+            continue;
+        }
 
         QString reason, category;
         bool    flagged    = false;
@@ -310,6 +334,28 @@ void FileScannerWorker::runHashWorker()
                     sf.sha256 = sha256;  // reuse from hash pass (no match, but computed)
                 else if (!m_noHashExtensions.contains(item.ext) && !m_ctx.isNetworkFs)
                     sf.sha256 = hashFileForOdysseus(item.filePath, item.fileSize);
+            }
+
+            // ── Phase 5: Allowlist suppression (SHA-256) ─────────────────
+            // Hash-based allowlisting is the preferred form (path is unstable;
+            // hash uniquely identifies the file content). We let the file go
+            // through detection so the hash is computed, then suppress the
+            // finding here. The existing "unflagged" branch below writes a
+            // clean cache entry so subsequent scans skip the file entirely.
+            if (allowlist
+                && !sf.sha256.isEmpty()
+                && allowlist->isFileIgnored(item.filePath.toStdString(),
+                                              sf.sha256.toStdString()))
+            {
+                if (cfg.verboseLogging) {
+                    qDebug().noquote()
+                        << "[Allowlist] suppressed finding —"
+                        << QFileInfo(item.filePath).fileName()
+                        << "(sha256:" << sf.sha256.left(12) + "...)";
+                }
+                flagged = false;
+                // Fall through to the !flagged branch below, which writes a
+                // clean cache entry and `continue`s the loop.
             }
 
             // ── Reputation DB enrichment ────────────────────────────────

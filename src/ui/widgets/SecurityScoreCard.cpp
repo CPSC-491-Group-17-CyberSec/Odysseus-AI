@@ -177,6 +177,26 @@ SecurityScoreCard::SecurityScoreCard(QWidget* parent)
         "color: %1; font-size: 11px;").arg(Theme::Color::textSecondary));
     v->addWidget(m_subtitle);
 
+    // ── Why-this-score breakdown ────────────────────────────────────────
+    auto* breakdownTitle = new QLabel("Why this score", this);
+    breakdownTitle->setStyleSheet(QString(
+        "color: %1; font-size: 11px; font-weight: 600;"
+        " text-transform: uppercase; letter-spacing: 0.5px;"
+        " padding-top: 4px;")
+            .arg(Theme::Color::textSecondary));
+    v->addWidget(breakdownTitle);
+
+    m_breakdownBox = new QVBoxLayout();
+    m_breakdownBox->setContentsMargins(0, 0, 0, 0);
+    m_breakdownBox->setSpacing(2);
+    v->addLayout(m_breakdownBox);
+
+    m_breakdownEmpty = new QLabel("No active findings.", this);
+    m_breakdownEmpty->setStyleSheet(QString(
+        "color: %1; font-size: 12px; font-style: italic;")
+            .arg(Theme::Color::textMuted));
+    m_breakdownBox->addWidget(m_breakdownEmpty);
+
     // ── 7-day trend chart ───────────────────────────────────────────────
     m_chart = new QChart();
     m_chart->setBackgroundBrush(Qt::transparent);
@@ -258,6 +278,84 @@ void SecurityScoreCard::rebuildTrend(const QVector<int>& trend)
     if (t.size() > 7) t = t.mid(t.size() - 7);
     for (int i = 0; i < t.size(); ++i)
         m_series->append(i, t[i]);
+}
+
+// ============================================================================
+//  Risk-based report path (Score.B)
+// ============================================================================
+void SecurityScoreCard::setReport(const EDR::ScoreReport& report)
+{
+    // Apply the score number + gauge color via the existing path.
+    setScore(report.score);
+
+    // Override the label using the engine's three-tier classification
+    // (Secure / Moderate / High Risk) — matches the spec exactly.
+    const QString labelText = EDR::scoreLabelToText(report.label);
+    const QString labelHex  = EDR::scoreLabelHex(report.label);
+    m_label->setText(labelText);
+    m_label->setStyleSheet(QString(
+        "color: %1; font-size: 14px; font-weight: 600;").arg(labelHex));
+
+    // Subtitle summary — short and informative
+    QString sub;
+    if (report.activeAlerts == 0) {
+        sub = "No active EDR-Lite findings.";
+    } else {
+        sub = QString("%1 active alert%2 — %3 critical, %4 high, "
+                      "%5 medium, %6 low.")
+                  .arg(report.activeAlerts)
+                  .arg(report.activeAlerts == 1 ? "" : "s")
+                  .arg(report.criticalCount).arg(report.highCount)
+                  .arg(report.mediumCount).arg(report.lowCount);
+    }
+    m_subtitle->setText(sub);
+
+    rebuildBreakdown(report.breakdown);
+}
+
+void SecurityScoreCard::rebuildBreakdown(const QVector<EDR::ScoreLine>& lines)
+{
+    if (!m_breakdownBox) return;
+
+    // Tear down previously-rendered breakdown labels (keep
+    // m_breakdownEmpty for reuse).
+    for (int i = m_breakdownBox->count() - 1; i >= 0; --i) {
+        QLayoutItem* it = m_breakdownBox->itemAt(i);
+        if (!it) continue;
+        QWidget* w = it->widget();
+        if (w && w != m_breakdownEmpty) {
+            m_breakdownBox->removeWidget(w);
+            w->deleteLater();
+        }
+    }
+
+    if (lines.isEmpty()
+        || (lines.size() == 1 && lines.first().delta == 0)) {
+        m_breakdownEmpty->setText(
+            lines.isEmpty()
+                ? QStringLiteral("No active findings.")
+                : lines.first().reason);
+        m_breakdownEmpty->setVisible(true);
+        return;
+    }
+
+    m_breakdownEmpty->setVisible(false);
+
+    for (const EDR::ScoreLine& line : lines) {
+        auto* row = new QLabel(this);
+        row->setWordWrap(true);
+        const QString prefix = (line.delta < 0)
+                                  ? QString::number(line.delta)
+                                  : QString("±0");
+        row->setText(QString("%1 · %2").arg(prefix, line.reason));
+        // Negative deltas in red-orange; informational lines in muted.
+        const QString color = (line.delta < 0)
+                                  ? QString(Theme::Color::severityCritical)
+                                  : QString(Theme::Color::textSecondary);
+        row->setStyleSheet(QString(
+            "color: %1; font-size: 12px; font-family: monospace;").arg(color));
+        m_breakdownBox->addWidget(row);
+    }
 }
 
 #include "SecurityScoreCard.moc"

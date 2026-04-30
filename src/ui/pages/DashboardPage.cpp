@@ -108,6 +108,15 @@ DashboardPage::DashboardPage(QWidget* parent)
     m_cardScanned->setTone(StatCard::Info);
     kpis->addWidget(m_cardScanned, 1);
 
+    // Phase 4 — EDR-Lite status card.
+    m_cardEdr = new StatCard(content);
+    m_cardEdr->setTitle("EDR-Lite");
+    m_cardEdr->setValue("Disabled");
+    m_cardEdr->setSubtitle("Enable in Settings");
+    m_cardEdr->setIcon("");
+    m_cardEdr->setTone(StatCard::Info);
+    kpis->addWidget(m_cardEdr, 1);
+
     main->addLayout(kpis);
 
     // ── Scan picker | Donut overview row ──────────────────────────────
@@ -429,4 +438,80 @@ void DashboardPage::refresh(const QVector<SuspiciousFile>& findings,
     }
     if (trend.isEmpty()) trend.append(score);
     m_score->setTrend(trend);
+}
+
+// ============================================================================
+//  Phase 4 — EDR-Lite hooks
+// ============================================================================
+void DashboardPage::setEdrStatus(bool             enabled,
+                                   const QDateTime& lastTick,
+                                   int              alertCount)
+{
+    if (!m_cardEdr) return;
+
+    if (!enabled) {
+        m_cardEdr->setTone(StatCard::Info);
+        m_cardEdr->setValue("Disabled");
+        m_cardEdr->setSubtitle("Enable in Settings");
+        return;
+    }
+
+    // Tone follows alert pressure: any alerts → Critical, otherwise Safe.
+    if (alertCount > 0) {
+        m_cardEdr->setTone(StatCard::Critical);
+        m_cardEdr->setValue(QString("%1 alert%2")
+                              .arg(alertCount)
+                              .arg(alertCount == 1 ? "" : "s"));
+    } else {
+        m_cardEdr->setTone(StatCard::Safe);
+        m_cardEdr->setValue("Active");
+    }
+
+    if (lastTick.isValid()) {
+        const qint64 secs = lastTick.secsTo(QDateTime::currentDateTime());
+        QString rel;
+        if      (secs < 60)     rel = QString("Last check %1 sec ago").arg(secs);
+        else if (secs < 3600)   rel = QString("Last check %1 min ago").arg(secs / 60);
+        else                     rel = QString("Last check %1 hr ago").arg(secs / 3600);
+        m_cardEdr->setSubtitle(rel);
+    } else {
+        m_cardEdr->setSubtitle("Waiting for first tick…");
+    }
+}
+
+void DashboardPage::setSecurityReport(const EDR::ScoreReport& report)
+{
+    // Risk-based path replaces the legacy file-finding score.
+    if (m_score) m_score->setReport(report);
+}
+
+void DashboardPage::appendEdrAlert(const EDR::Alert& alert)
+{
+    if (!m_activity) return;
+
+    // Build a one-shot ActivityList::Entry. We don't try to keep the
+    // whole alert log here — that's the Alerts page. The dashboard just
+    // shows the most-recent few alongside scan events.
+    ActivityList::Entry e;
+    switch (alert.severity) {
+        case EDR::Severity::Critical: e.tone = ActivityList::Critical; break;
+        case EDR::Severity::High:     e.tone = ActivityList::Critical; break;
+        case EDR::Severity::Medium:   e.tone = ActivityList::Warning;  break;
+        case EDR::Severity::Low:      e.tone = ActivityList::Info;     break;
+        default:                       e.tone = ActivityList::System;   break;
+    }
+    e.title    = alert.title;
+    e.subtitle = alert.sourcePath;
+    e.when     = alert.timestamp.isValid()
+                    ? alert.timestamp
+                    : QDateTime::currentDateTime();
+
+    // We rebuild the whole list each time to keep the dashboard's existing
+    // "scan events + system snapshot + flagged files" logic intact. The
+    // simplest path: prepend the new alert to a small list and let the
+    // next refresh() rebuild things. For now, just shove it at the top
+    // by re-using setEntries with a single new item kept in m_lastEdrEntry.
+    QVector<ActivityList::Entry> existing;
+    existing.append(e);
+    m_activity->setEntries(existing);
 }

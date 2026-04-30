@@ -69,6 +69,13 @@ private slots:
     void onSearchChanged();
     void onFilterChanged();
 
+    // Phase 5 — Response & Control Layer wiring.
+    // Both slots use the currently-selected finding (m_selectedIndex) and
+    // route through the global ResponseManager. They no-op if no finding
+    // is selected.
+    void onQuarantineClicked();
+    void onIgnoreClicked();
+
 private:
     void buildUi();
     void rebuildVisibleRows();

@@ -82,6 +82,13 @@ QJsonObject ScannerConfig::toJson() const
     o["processCrossViewCheckEnabled"]       = processCrossViewCheckEnabled;
     o["kernelExtensionCheckEnabled"]        = kernelExtensionCheckEnabled;
     o["integrityCheckEnabled"]              = integrityCheckEnabled;
+    // Phase 4 (EDR-Lite)
+    o["edrLiteEnabled"]                     = edrLiteEnabled;
+    o["monitoringIntervalSeconds"]          = monitoringIntervalSeconds;
+    o["alertOnNewProcess"]                  = alertOnNewProcess;
+    o["alertOnNewPersistence"]              = alertOnNewPersistence;
+    o["alertOnIntegrityMismatch"]           = alertOnIntegrityMismatch;
+    o["alertOnKernelExtensionChange"]       = alertOnKernelExtensionChange;
     return o;
 }
 
@@ -115,6 +122,19 @@ ScannerConfig ScannerConfig::fromJson(const QJsonObject& o)
         jsonBool(o, "kernelExtensionCheckEnabled",   defaults.kernelExtensionCheckEnabled);
     c.integrityCheckEnabled =
         jsonBool(o, "integrityCheckEnabled",         defaults.integrityCheckEnabled);
+    // Phase 4 (EDR-Lite)
+    c.edrLiteEnabled =
+        jsonBool(o, "edrLiteEnabled",                defaults.edrLiteEnabled);
+    c.monitoringIntervalSeconds =
+        jsonInt (o, "monitoringIntervalSeconds",     defaults.monitoringIntervalSeconds);
+    c.alertOnNewProcess =
+        jsonBool(o, "alertOnNewProcess",             defaults.alertOnNewProcess);
+    c.alertOnNewPersistence =
+        jsonBool(o, "alertOnNewPersistence",         defaults.alertOnNewPersistence);
+    c.alertOnIntegrityMismatch =
+        jsonBool(o, "alertOnIntegrityMismatch",      defaults.alertOnIntegrityMismatch);
+    c.alertOnKernelExtensionChange =
+        jsonBool(o, "alertOnKernelExtensionChange",  defaults.alertOnKernelExtensionChange);
     return c;
 }
 
@@ -200,7 +220,9 @@ void ensureLoaded()
         << " rootkit="  << (g_config.rootkitAwarenessEnabled  ? "on" : "off")
         << " xview="    << (g_config.processCrossViewCheckEnabled ? "on" : "off")
         << " kext="     << (g_config.kernelExtensionCheckEnabled  ? "on" : "off")
-        << " integ="    << (g_config.integrityCheckEnabled        ? "on" : "off");
+        << " integ="    << (g_config.integrityCheckEnabled        ? "on" : "off")
+        << " edr="      << (g_config.edrLiteEnabled               ? "on" : "off")
+        << "(" << g_config.monitoringIntervalSeconds << "s)";
 }
 
 }  // anonymous

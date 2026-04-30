@@ -61,6 +61,17 @@ struct ScannerConfig
     bool kernelExtensionCheckEnabled     = true;
     bool integrityCheckEnabled           = true;
 
+    // ── Phase 4: EDR-Lite continuous monitoring (BETA) ─────────────────
+    // Default disabled — user opts in via Settings. When enabled, the
+    // MonitoringService runs SystemMonitor::refresh() every
+    // monitoringIntervalSeconds and emits Alerts on diffs.
+    bool edrLiteEnabled                  = false;
+    int  monitoringIntervalSeconds       = 15;
+    bool alertOnNewProcess               = true;
+    bool alertOnNewPersistence           = true;
+    bool alertOnIntegrityMismatch        = true;
+    bool alertOnKernelExtensionChange    = true;
+
     // ── Tunables ───────────────────────────────────────────────────────
     /// Subdirectory (relative to YARA rules dir) holding aggressive/noisy
     /// rules that are skipped unless experimentalRules is true.

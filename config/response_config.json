@@ -1,0 +1,16 @@
+{
+  "responseActionsEnabled": true,
+  "quarantineEnabled":      true,
+  "processKillEnabled":     false,
+  "allowlistEnabled":       true,
+
+  "_comment": "Phase 5 response config. processKillEnabled is OFF by default because killing processes can cause data loss or instability. Toggle in Settings only if you understand the consequences.",
+  "_paths": {
+    "macOS_appData":  "~/Library/Application Support/Odysseus-AI/",
+    "linux_appData":  "~/.local/share/Odysseus-AI/",
+    "quarantineDir":  "<appData>/quarantine/",
+    "metadataFile":   "<appData>/quarantine_metadata.jsonl",
+    "allowlistFile":  "<appData>/odysseus_allowlist.jsonl",
+    "actionLogFile":  "<appData>/odysseus_action_log.jsonl"
+  }
+}
