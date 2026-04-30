@@ -29,6 +29,7 @@
 #include <QScrollArea>
 #include <QSpacerItem>
 #include <QSplitter>
+#include <QPointer>          // shutdown safety — guard async callbacks
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStorageInfo>
@@ -215,8 +216,30 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
-  if (m_scanner)
-    m_scanner->cancelScan();
+  // ── Shutdown order matters ──
+  //
+  // 1. Stop the EDR-Lite tick first so no new SystemMonitor refresh
+  //    fires after we start tearing things down. MonitoringService::stop
+  //    is idempotent and stops the QTimer + clears the active-alert map.
+  if (m_monitor) m_monitor->stop();
+  //
+  // 2. Cancel any in-flight file scan. cancelScan() blocks until every
+  //    hash-worker QThread joins, so by the time it returns no signals
+  //    can be queued against this MainWindow from the scanner side.
+  if (m_scanner) m_scanner->cancelScan();
+  //
+  // 3. Stop the directory-size walker (partial-scan helper). Without
+  //    this the walker thread can outlive MainWindow and dereference
+  //    its captured `this` via QMetaObject::invokeMethod.
+  if (m_sizeThread && m_sizeThread->isRunning()) {
+    m_sizeThread->requestInterruption();
+    m_sizeThread->wait(2000);
+  }
+  //
+  // ScanDatabase, MonitoringService, SystemMonitor, FileScanner, and the
+  // Phase-5 Response subsystem all clean themselves up in their own
+  // destructors. Those destructors run automatically as Qt walks the
+  // child-object tree once this destructor body returns.
 }
 
 // ============================================================================
@@ -2350,8 +2373,20 @@ void MainWindow::startScanForPath(const QString& rootPath) {
     // Partial scan: calculate the actual directory size in a background thread
     // so we don't block the UI while walking potentially large directory trees.
     scanStorageLabel->setText("Storage: Calculating...");
+
+    // Shutdown safety: if a previous size-walker is still running (e.g.
+    // user kicks off a new partial scan immediately), interrupt + join it
+    // before launching a fresh one. Tracking this thread also lets the
+    // destructor stop it cleanly so its lambda doesn't fire against a
+    // destroyed `this`.
+    if (m_sizeThread && m_sizeThread->isRunning()) {
+      m_sizeThread->requestInterruption();
+      m_sizeThread->wait(2000);
+    }
+
     QString capturedPath = rootPath;
-    auto* sizeThread = QThread::create([this, capturedPath]() {
+    QPointer<MainWindow> self(this);   // weak, auto-zeroes on destruction
+    m_sizeThread = QThread::create([self, capturedPath]() {
       qint64 total = 0;
       QDirIterator it(
           capturedPath,
@@ -2363,16 +2398,27 @@ void MainWindow::startScanForPath(const QString& rootPath) {
         it.next();
         total += it.fileInfo().size();
       }
-      QMetaObject::invokeMethod(this, [this, total]() {
-        m_driveTotalBytes = total;
-        // Only update label if the scan is still in progress;
-        // onScanFinished may have already written the final summary.
-        if (m_scanActive && total > 0)
-          scanStorageLabel->setText("Storage: 0 B / " + formatBytes(total));
+      // Marshal back to the UI thread, but only if the receiver is still
+      // alive. `self.data()` returns nullptr after MainWindow is destroyed;
+      // QMetaObject::invokeMethod is a no-op on a null receiver — it would
+      // assert in debug builds, so we check first.
+      if (!self) return;
+      QMetaObject::invokeMethod(self.data(), [self, total]() {
+        if (!self) return;
+        self->m_driveTotalBytes = total;
+        if (self->m_scanActive && total > 0)
+          self->scanStorageLabel->setText(
+              "Storage: 0 B / " + formatBytes(total));
       }, Qt::QueuedConnection);
     });
-    connect(sizeThread, &QThread::finished, sizeThread, &QObject::deleteLater);
-    sizeThread->start();
+    connect(m_sizeThread, &QThread::finished, m_sizeThread,
+            &QObject::deleteLater);
+    // Clear the pointer when the thread is destroyed so the destructor
+    // doesn't double-wait on a freed QThread.
+    connect(m_sizeThread, &QThread::destroyed, this, [this]() {
+      m_sizeThread = nullptr;
+    });
+    m_sizeThread->start();
   }
 
   // Persist this scan's root so "Scan from Last Point" can resume here next time.
@@ -2402,6 +2448,12 @@ void MainWindow::onProgressUpdated(int percent) {
   // Simple clamped linear update – no jumping, bar only moves forward
   if (percent > scanProgressBar->value())
     scanProgressBar->setValue(percent);
+
+  // Mirror the same percent into the new Scan tab's progress strip.
+  // Backend stays unchanged — this is a read-only fan-out of the existing
+  // signal so the user sees % progress on the Scan tab too.
+  if (m_scanPage)
+    m_scanPage->setProgress(percent);
 }
 
 void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file) {
@@ -2409,6 +2461,12 @@ void MainWindow::onSuspiciousFileFound(const SuspiciousFile& file) {
   refreshDashboard();                    // live-update the new dashboard cards
   if (m_resultsPage)
     m_resultsPage->appendFinding(file);  // refactor: feed the new ResultsPage
+
+  // UI-only — push the live threats count into the Scan tab so the
+  // THREATS FOUND KPI reflects the in-progress scan rather than only
+  // updating once scanFinished fires.
+  if (m_scanPage)
+    m_scanPage->setLiveCounts(/*filesScanned=*/0, m_findings.size());
 
   // Use classification-aware log label instead of always "[SUSPICIOUS]"
   QString logLabel = "[FLAGGED]";
@@ -2800,6 +2858,11 @@ void MainWindow::onScanError(const QString& message) {
   scanStatusLabel->setStyleSheet("font-size: 13px; font-weight: bold; color: #B71C1C;");
   scanPathLabel->clear();
   scanSummaryLabel->setText("Scan could not complete.");
+
+  // Flip the new ScanPage out of the in-progress state so the elapsed
+  // timer stops and the progress strip leaves "Scanning…". UI-only.
+  if (m_scanPage)
+    m_scanPage->setScanning(false);
 }
 
 void MainWindow::onCloseScanResultsClicked() {
@@ -3057,17 +3120,27 @@ void MainWindow::requestLlmExplanation(int findingIndex) {
   // Extract features on the main thread (fast ~ms I/O for small files).
   std::vector<float> features = extractFeatures(filePath.toStdString());
 
-  // Fire the async LLM request — explainAsync spawns a detached std::thread
-  // internally; the callback runs on that background thread, so we use
-  // QMetaObject::invokeMethod to deliver the result to the UI thread.
+  // Fire the async LLM request — explainAsync runs the work on the global
+  // QThreadPool; the callback runs on that worker thread, so we marshal
+  // the result back to the UI thread via QMetaObject::invokeMethod.
+  //
+  // Shutdown safety: the LLM round-trip can take many seconds (Ollama
+  // loading a model). If MainWindow is destroyed mid-request, the worker
+  // thread keeps running and would otherwise touch a destroyed `this`.
+  // We capture a QPointer<MainWindow> instead of `this`; the QPointer
+  // is auto-zeroed when the MainWindow is destroyed, and we early-return
+  // before any dereference.
+  QPointer<MainWindow> self(this);
   m_llmExplainer->explainAsync(
       filePath.toStdString(),
       features,
       anomalyScore,
-      [this, idx](const std::string& response, bool success) {
+      [self, idx](const std::string& response, bool success) {
+    if (!self) return;
     QString explanation = success ? QString::fromStdString(response) : QString();
-    QMetaObject::invokeMethod(this, [this, idx, explanation, success]() {
-      onLlmExplanationReady(idx, explanation, success);
+    QMetaObject::invokeMethod(self.data(), [self, idx, explanation, success]() {
+      if (!self) return;
+      self->onLlmExplanationReady(idx, explanation, success);
     }, Qt::QueuedConnection);
   },
       classificationLevel.toStdString());

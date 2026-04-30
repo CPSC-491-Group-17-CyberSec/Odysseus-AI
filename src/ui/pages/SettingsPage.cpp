@@ -6,7 +6,11 @@
 #include "../theme/DashboardTheme.h"
 #include "../widgets/ToggleRow.h"
 
-// Phase 5 — Allowlist editor
+// Phase 5 — Response & Control Layer (needed by Allowlist editor + slots)
+#include "response/ResponseManager.h"
+#include "response/ResponseManagerSingleton.h"
+#include "response/ResponseTypes.h"
+
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -15,18 +19,13 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QTimer>
-<<<<<<< HEAD
-#include <QVBoxLayout>
-
-#include "response/ResponseManager.h"
-#include "response/ResponseManagerSingleton.h"
-#include "response/ResponseTypes.h"
-<<<<<<< HEAD
-=======
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
 #include <QApplication>
 #include <QPainter>
 #include <QStyleOption>
+#include <QVBoxLayout>
+#include <QComboBox>
+#include <QListWidget>
+#include <algorithm>
     // #include <QStandardPaths>
 
     class CacheOverlay : public QWidget {
@@ -110,15 +109,6 @@
     }
   }
 };
-<<<<<<< HEAD
-== == == =
-#include <QComboBox>
-#include <QListWidget>
-             >>>>>>> 8c5b12c (P3: Allowlist editor section (SHA-256 first, remove via ResponseManager))
-=======
-#include <QComboBox>
-#include <QListWidget>
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
 
     namespace {
 
@@ -276,20 +266,11 @@ void SettingsPage::buildUi() {
     appendToggle(sec, m_verboseLogging);
   }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-  // ── Data & Storage ─────────────────────────────────────────────────
-  {
-    QVBoxLayout* sec = nullptr;
-    // Use your app's native card builder so the header perfectly matches the others
-    main->addWidget(makeSectionCard("Data & Storage", content, &sec));
-=======
     // ── Data & Storage ─────────────────────────────────────────────────
     {
         QVBoxLayout* sec = nullptr;
         // Use your app's native card builder so the header perfectly matches the others
         main->addWidget(makeSectionCard("Data & Storage", content, &sec));
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
 
     QPushButton* clearCacheBtn = new QPushButton("Clear Cache", content);
     clearCacheBtn->setCursor(Qt::PointingHandCursor);
@@ -310,18 +291,14 @@ void SettingsPage::buildUi() {
 
     connect(clearCacheBtn, &QPushButton::clicked, this, &SettingsPage::onClearCacheClicked);
 
-<<<<<<< HEAD
-    // Wrap the button in an HBoxLayout so it aligns left and doesn't stretch 100% width
+    // Wrap the button in an HBoxLayout so it aligns left and doesn't stretch
+    // 100% width.
     QHBoxLayout* btnLay = new QHBoxLayout();
     btnLay->addWidget(clearCacheBtn);
     btnLay->addStretch();
 
     sec->addLayout(btnLay);
-    == == == =
-=======
-        sec->addLayout(btnLay);
     }
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
     // ── Section: EDR-Lite Monitoring (Beta) — Phase 4 ─────────────────
     { QVBoxLayout* sec = nullptr;
     main->addWidget(makeSectionCard("EDR-Lite Monitoring (Beta)", content, &sec));
@@ -415,17 +392,6 @@ void SettingsPage::buildUi() {
     QVBoxLayout* sec = nullptr;
     main->addWidget(makeSectionCard("Allowlist", content, &sec));
 
-<<<<<<< HEAD
-    auto* desc = new QLabel(
-        "Files added to the allowlist are suppressed in future scans. "
-        "Hash-based entries (preferred) match by SHA-256; path-based "
-        "entries match by location. Removing an entry will cause the "
-        "file to be re-evaluated on the next scan.",
-        content);
-    desc->setStyleSheet(
-        QString("QLabel { color: %1; %2 background: transparent; padding-bottom: 8px; }")
-            .arg(Theme::Color::textSecondary)
-=======
         auto* desc = new QLabel(
             "Files added to the allowlist are suppressed in future scans. "
             "Hash-based entries (preferred) match by SHA-256; path-based "
@@ -514,109 +480,6 @@ void SettingsPage::buildUi() {
 
         rebuildAllowlistView();
     }
-
-    // ── Footer: config path + actions ──────────────────────────────────
-    auto* footer = new QFrame(content);
-    footer->setStyleSheet(QString(
-        "QFrame { background: transparent;"
-        "         border-top: 1px solid %1;"
-        "         padding-top: 12px; }")
-            .arg(Theme::Color::borderSubtle));
-    auto* footerLayout = new QVBoxLayout(footer);
-    footerLayout->setContentsMargins(0, 12, 0, 0);
-    footerLayout->setSpacing(10);
-
-    m_pathLabel = new QLabel("", footer);
-    m_pathLabel->setStyleSheet(QString(
-        "color: %1; %2 background: transparent;")
-            .arg(Theme::Color::textMuted)
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
-            .arg(Theme::Type::qss(Theme::Type::Caption)));
-    desc->setWordWrap(true);
-    sec->addWidget(desc);
-
-    // List + side controls.
-    auto* row = new QHBoxLayout();
-    row->setSpacing(12);
-
-    m_allowlistView = new QListWidget(content);
-    m_allowlistView->setStyleSheet(
-        QString("QListWidget { background-color: %1; color: %2;"
-                " border: 1px solid %3; border-radius: 8px; padding: 4px; }"
-                "QListWidget::item { padding: 6px; border-radius: 4px; }"
-                "QListWidget::item:selected { background-color: %4; color: white; }")
-            .arg(
-                Theme::Color::bgSecondary,
-                Theme::Color::textPrimary,
-                Theme::Color::borderSubtle,
-                Theme::Color::accentBlue));
-    m_allowlistView->setMinimumHeight(180);
-    connect(
-        m_allowlistView,
-        &QListWidget::itemSelectionChanged,
-        this,
-        &SettingsPage::onAllowlistSelectionChanged);
-    row->addWidget(m_allowlistView, 1);
-
-    // Side action column.
-    auto* sideCol = new QVBoxLayout();
-    sideCol->setSpacing(8);
-
-    m_allowlistRefresh = new QPushButton("Refresh", content);
-    m_allowlistRefresh->setCursor(Qt::PointingHandCursor);
-    m_allowlistRefresh->setStyleSheet(
-        QString("QPushButton { background: transparent; color: %1;"
-                " border: 1px solid %2; border-radius: 8px;"
-                " padding: 8px 14px; %3 }"
-                "QPushButton:hover { background-color: %4; color: white; }")
-            .arg(Theme::Color::textPrimary, Theme::Color::borderSubtle)
-            .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi))
-            .arg(Theme::Color::accentBlueSoft));
-    connect(
-        m_allowlistRefresh, &QPushButton::clicked, this, &SettingsPage::onAllowlistRefreshClicked);
-    sideCol->addWidget(m_allowlistRefresh);
-
-    m_allowlistRemove = new QPushButton("Remove selected", content);
-    m_allowlistRemove->setCursor(Qt::PointingHandCursor);
-    m_allowlistRemove->setEnabled(false);
-    m_allowlistRemove->setStyleSheet(
-        QString("QPushButton { background-color: %1; color: white; border: none;"
-                " border-radius: 8px; padding: 9px 14px; %2 }"
-                "QPushButton:hover { background-color: %3; }"
-                "QPushButton:disabled { background-color: %4; color: %5; }")
-            .arg(Theme::Color::accentBlue)
-            .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi))
-            .arg(Theme::Color::accentBlueHover)
-            .arg(Theme::Color::bgSecondary)
-            .arg(Theme::Color::textMuted));
-    connect(
-        m_allowlistRemove, &QPushButton::clicked, this, &SettingsPage::onAllowlistRemoveClicked);
-    sideCol->addWidget(m_allowlistRemove);
-
-    sideCol->addStretch(1);
-    row->addLayout(sideCol);
-
-    sec->addLayout(row);
-
-    m_allowlistEmpty = new QLabel(
-        "Allowlist is empty. Use the Ignore button on a finding to add "
-        "an entry.",
-        content);
-    m_allowlistEmpty->setStyleSheet(QString("QLabel { color: %1; %2 background: transparent;"
-                                            " padding: 12px 4px; }")
-                                        .arg(Theme::Color::textMuted)
-                                        .arg(Theme::Type::qss(Theme::Type::Caption)));
-    m_allowlistEmpty->setWordWrap(true);
-    sec->addWidget(m_allowlistEmpty);
-
-    m_allowlistStatus = new QLabel(content);
-    m_allowlistStatus->setVisible(false);
-    m_allowlistStatus->setWordWrap(true);
-    sec->addWidget(m_allowlistStatus);
-
-    rebuildAllowlistView();
->>>>>>> 8c5b12c (P3: Allowlist editor section (SHA-256 first, remove via ResponseManager))
-  }
 
   // ── Footer: config path + actions ──────────────────────────────────
   auto* footer = new QFrame(content);
@@ -855,12 +718,6 @@ void SettingsPage::onResetClicked() {
   });
 }
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-void SettingsPage::onClearCacheClicked() {
-  // QString roaming = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  // QString local = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-=======
 void SettingsPage::onClearCacheClicked()
 {
     // QString roaming = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -870,7 +727,6 @@ void SettingsPage::onClearCacheClicked()
     //     "Your active database is inside one of these folders:\n\n"
     //     "ROAMING:\n" + roaming + "\n\n"
     //     "LOCAL:\n" + local);
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
 
   // QMessageBox::information(this, "Database Finder",
   //     "Your active database is inside one of these folders:\n\n"
@@ -887,16 +743,12 @@ void SettingsPage::onClearCacheClicked()
 
   overlay->show();
 }
-<<<<<<< HEAD
-== == == =
              // ============================================================================
              //  Phase 5 — Allowlist editor slots
              // ============================================================================
-=======
 // ============================================================================
 //  Phase 5 — Allowlist editor slots
 // ============================================================================
->>>>>>> c414763 (Tune EDR dev-tool false positives and add final audit)
 
     namespace {
   QString allowlistKindLabel(odysseus::response::AllowlistEntry::Kind k) {

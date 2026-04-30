@@ -29,6 +29,8 @@ class QComboBox;
 class QCheckBox;
 class QFrame;
 class QVBoxLayout;
+class QProgressBar;   // Progress strip — % complete
+class QTimer;         // Elapsed-time tick
 
 class ScanPage : public QWidget {
   Q_OBJECT
@@ -51,6 +53,16 @@ class ScanPage : public QWidget {
 
   /// Toggle Start-Scan button state when a scan is running.
   void setScanning(bool scanning);
+
+  /// Update the progress strip (0..100). Forwarded by MainWindow from
+  /// FileScanner::progressUpdated. Does not change KPI cards.
+  void setProgress(int percent);
+
+  /// Live mid-scan KPI updates. Called by MainWindow whenever a finding
+  /// arrives so the user sees THREATS FOUND tick up in real time without
+  /// waiting for scanFinished. Backend is unchanged — this is just a
+  /// display binding.
+  void setLiveCounts(int filesScanned, int threatsFound);
 
  signals:
   /// User clicked Start Scan. `targets` may be empty (caller should
@@ -86,6 +98,18 @@ class ScanPage : public QWidget {
   StatCard* m_kpiFilesScanned = nullptr;
   StatCard* m_kpiThreatsFound = nullptr;
   StatCard* m_kpiStatus = nullptr;
+
+  // ── Progress strip (lives directly under the KPI row) ─────────────
+  // Visibility is driven by setScanning(): hidden until the first scan
+  // starts, stays visible afterwards so the "Scan Complete" terminal
+  // state is readable. UI-only; no backend changes.
+  QFrame*       m_progressStrip = nullptr;
+  QProgressBar* m_progressBar   = nullptr;
+  QLabel*       m_progressPhase = nullptr;   // "Scanning…" / "Scan Complete"
+  QLabel*       m_progressPct   = nullptr;   // mirrors the bar value
+  QLabel*       m_elapsedLabel  = nullptr;   // "Elapsed: 00:45"
+  QTimer*       m_elapsedTimer  = nullptr;
+  QDateTime     m_scanStarted;
 
   // ── Scan Targets ──────────────────────────────────────────────────
   DropArea* m_dropArea = nullptr;

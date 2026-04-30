@@ -20,26 +20,6 @@
 namespace {
 
 // Color for severity badges
-QString severityColor(const QString& sev) {
-  const QString s = sev.toLower();
-  if (s == "high" || s == "critical")
-    return "#C62828";
-  if (s == "medium")
-    return "#E65100";
-  if (s == "low")
-    return "#2E7D32";
-  return "#888888";
-}
-
-QString severityBg(const QString& sev) {
-  const QString s = sev.toLower();
-  if (s == "high" || s == "critical")
-    return "#FDECEA";
-  if (s == "medium")
-    return "#FFF3E0";
-  if (s == "low")
-    return "#E8F5E9";
-  return "#F0F0F0";
 QString severityColor(const QString& sev)
 {
     const QString s = sev.toLower();

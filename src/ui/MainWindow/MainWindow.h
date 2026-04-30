@@ -28,6 +28,7 @@ class QTimer;
 class QNetworkAccessManager;
 class QNetworkReply;
 class QScrollArea;
+class QThread;
 
 class FileScanner;
 class Sidebar;
@@ -267,6 +268,12 @@ class MainWindow : public QMainWindow {
   AlertsPage* m_alertsPage = nullptr;           // Phase 4 EDR — Alerts (page 5)
   QuarantinePage* m_quarantinePage = nullptr;   // Phase 5 — Quarantine list + restore (page 6)
   MonitoringService* m_monitor = nullptr;       // Phase 4 EDR — periodic ticks
+
+  // Background directory-size walker for partial scans. Tracked so the
+  // destructor can interrupt + wait for it before MainWindow goes away
+  // (otherwise the lambda's QMetaObject::invokeMethod fires against a
+  // destroyed `this` → UAF on shutdown).
+  QThread* m_sizeThread = nullptr;
 
   void setupShell();
   QWidget* makePlaceholderPage(const QString& title, const QString& subtitle);

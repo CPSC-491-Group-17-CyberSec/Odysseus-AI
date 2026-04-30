@@ -16,9 +16,12 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QPushButton>
+#include <QProgressBar>      // progress strip
 #include <QScrollArea>
 #include <QStandardPaths>
 #include <QStorageInfo>
+#include <QTimer>            // elapsed-time tick
+#include <QDateTime>
 #include <QVBoxLayout>
 
 #include "../theme/DashboardTheme.h"
@@ -187,6 +190,89 @@ void ScanPage::buildUi() {
   kpiRow->addWidget(m_kpiStatus, 1);
 
   main->addLayout(kpiRow);
+
+  // ── Progress strip (sits directly under the KPI row, above the grid) ──
+  // Hidden until the first scan starts. Once a scan has run, the strip
+  // stays visible so the user can see the final "Scan Complete" state.
+  // UI-only — no backend changes; data flows in from MainWindow via
+  // setProgress() / setLiveCounts() / setScanning().
+  m_progressStrip = new QFrame(content);
+  m_progressStrip->setObjectName("OdyScanProgressStrip");
+  m_progressStrip->setAttribute(Qt::WA_StyledBackground, true);
+  m_progressStrip->setStyleSheet(QString(
+      "QFrame#OdyScanProgressStrip {"
+      "  background-color: %1;"
+      "  border: 1px solid %2;"
+      "  border-radius: 12px;"
+      "}").arg(Theme::Color::bgCard, Theme::Color::borderSubtle));
+
+  auto* stripLayout = new QVBoxLayout(m_progressStrip);
+  stripLayout->setContentsMargins(20, 14, 20, 14);
+  stripLayout->setSpacing(10);
+
+  // First row: phase text on the left, percent + elapsed on the right.
+  auto* stripTopRow = new QHBoxLayout();
+  stripTopRow->setSpacing(16);
+
+  m_progressPhase = new QLabel("Idle", m_progressStrip);
+  m_progressPhase->setStyleSheet(QString(
+      "QLabel { color: %1; %2 background: transparent; }")
+        .arg(Theme::Color::textPrimary)
+        .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi)));
+  stripTopRow->addWidget(m_progressPhase, 1);
+
+  m_progressPct = new QLabel("0%", m_progressStrip);
+  m_progressPct->setStyleSheet(QString(
+      "QLabel { color: %1; %2 background: transparent; }")
+        .arg(Theme::Color::textSecondary)
+        .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi)));
+  stripTopRow->addWidget(m_progressPct, 0);
+
+  m_elapsedLabel = new QLabel("Elapsed: 00:00", m_progressStrip);
+  m_elapsedLabel->setStyleSheet(QString(
+      "QLabel { color: %1; %2 background: transparent; }")
+        .arg(Theme::Color::textSecondary)
+        .arg(Theme::Type::qss(Theme::Type::Body)));
+  stripTopRow->addWidget(m_elapsedLabel, 0);
+
+  stripLayout->addLayout(stripTopRow);
+
+  // Progress bar — dark theme, blue fill matching the brand accent.
+  m_progressBar = new QProgressBar(m_progressStrip);
+  m_progressBar->setRange(0, 100);
+  m_progressBar->setValue(0);
+  m_progressBar->setTextVisible(false);
+  m_progressBar->setFixedHeight(8);
+  m_progressBar->setStyleSheet(QString(
+      "QProgressBar {"
+      "  background-color: %1;"
+      "  border: 1px solid %2;"
+      "  border-radius: 4px;"
+      "}"
+      "QProgressBar::chunk {"
+      "  background-color: %3;"
+      "  border-radius: 3px;"
+      "}").arg(Theme::Color::bgSecondary,
+              Theme::Color::borderSubtle,
+              Theme::Color::accentBlue));
+  stripLayout->addWidget(m_progressBar);
+
+  // Hidden by default (only shown once a scan starts).
+  m_progressStrip->setVisible(false);
+
+  main->addWidget(m_progressStrip);
+
+  // Elapsed-time ticker — created once, started/stopped by setScanning().
+  m_elapsedTimer = new QTimer(this);
+  m_elapsedTimer->setInterval(1000);
+  connect(m_elapsedTimer, &QTimer::timeout, this, [this]() {
+    if (!m_scanStarted.isValid() || !m_elapsedLabel) return;
+    const qint64 secs = m_scanStarted.secsTo(QDateTime::currentDateTime());
+    m_elapsedLabel->setText(
+        QString("Elapsed: %1:%2")
+            .arg(secs / 60, 2, 10, QChar('0'))
+            .arg(secs % 60, 2, 10, QChar('0')));
+  });
 
   // ── Main 3-column grid ────────────────────────────────────────────
   auto* grid = new QHBoxLayout();
@@ -796,13 +882,65 @@ void ScanPage::setRecentScans(const QVector<ScanRecord>& history) {
 }
 
 void ScanPage::setScanning(bool scanning) {
-  if (!m_btnStart)
-    return;
-  m_btnStart->setEnabled(!scanning);
-  m_btnStart->setText(scanning ? "Scan in progress…" : "Start Scan");
+  if (m_btnStart) {
+    m_btnStart->setEnabled(!scanning);
+    m_btnStart->setText(scanning ? "Scan in progress…" : "Start Scan");
+  }
   if (m_startSubtitle)
     m_startSubtitle->setText(
         scanning ? "Findings will appear under Results" : "This may take a few moments");
+
+  // ── Progress strip lifecycle ──────────────────────────────────────
+  if (!m_progressStrip) return;
+
+  if (scanning) {
+    // Make the strip visible (first scan) and reset the indicator state
+    // for a fresh run. We track wall-clock so the elapsed timer is robust
+    // to QTimer drift over long scans.
+    m_progressStrip->setVisible(true);
+    m_scanStarted = QDateTime::currentDateTime();
+    if (m_progressBar)   { m_progressBar->setValue(0); }
+    if (m_progressPct)   { m_progressPct->setText("0%"); }
+    if (m_progressPhase) { m_progressPhase->setText("Scanning…"); }
+    if (m_elapsedLabel)  { m_elapsedLabel->setText("Elapsed: 00:00"); }
+    if (m_elapsedTimer && !m_elapsedTimer->isActive())
+      m_elapsedTimer->start();
+  } else {
+    // Scan ended — leave the strip visible so the user sees the final
+    // state. Stop the ticker and pin progress to 100%.
+    if (m_elapsedTimer && m_elapsedTimer->isActive())
+      m_elapsedTimer->stop();
+    if (m_progressBar)   { m_progressBar->setValue(100); }
+    if (m_progressPct)   { m_progressPct->setText("100%"); }
+    if (m_progressPhase) { m_progressPhase->setText("Scan Complete"); }
+  }
+}
+
+// UI-only forwarders — backend signals stay unchanged.
+void ScanPage::setProgress(int percent) {
+  percent = qBound(0, percent, 100);
+  if (m_progressBar && percent > m_progressBar->value())
+    m_progressBar->setValue(percent);
+  if (m_progressPct)
+    m_progressPct->setText(QString::number(percent) + "%");
+}
+
+void ScanPage::setLiveCounts(int filesScanned, int threatsFound) {
+  if (m_kpiFilesScanned) {
+    if (filesScanned > 0) {
+      m_kpiFilesScanned->setValue(QString("%L1").arg(filesScanned));
+      m_kpiFilesScanned->setSubtitle("Files scanned so far");
+    } else {
+      // Backend doesn't expose a fine-grained running count yet; leave
+      // value at the previous total but reflect the in-progress state.
+      m_kpiFilesScanned->setSubtitle("Counting…");
+    }
+  }
+  if (m_kpiThreatsFound) {
+    m_kpiThreatsFound->setValue(QString::number(threatsFound));
+    m_kpiThreatsFound->setSubtitle(
+        threatsFound > 0 ? "Found during this scan" : "None so far");
+  }
 }
 
 // ============================================================================

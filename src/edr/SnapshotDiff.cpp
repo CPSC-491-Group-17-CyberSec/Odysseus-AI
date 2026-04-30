@@ -64,13 +64,6 @@ namespace {
 //  helpers
 // ────────────────────────────────────────────────────────────────────────────
 
-EDR::Severity processSeverity(const QString& raw) {
-  const QString s = raw.toLower();
-  if (s == "high")
-    return EDR::Severity::High;
-  if (s == "medium")
-    return EDR::Severity::Medium;
-  if (s == "low")
 EDR::Severity processSeverity(const QString& raw)
 {
     const QString s = raw.toLower();
@@ -81,14 +74,6 @@ EDR::Severity processSeverity(const QString& raw)
     return EDR::Severity::Medium;     // default for suspicious processes
 }
 
-EDR::Severity persistenceSeverity(const QString& raw)
-{
-    const QString s = raw.toLower();
-    if (s == "high")    return EDR::Severity::High;
-    if (s == "medium")  return EDR::Severity::Medium;
-    return EDR::Severity::Low;
-  return EDR::Severity::Medium;  // default for suspicious processes
-}
 
 EDR::Severity persistenceSeverity(const QString& raw) {
   const QString s = raw.toLower();
@@ -141,21 +126,6 @@ void diffSuspiciousProcesses(
   for (const SuspiciousProcess& sp : curr.suspicious) {
     const QString key = keyForProcess(sp);
 
-    EDR::Alert a;
-    a.id = newId();
-    a.dedupKey = key;
-    a.timestamp = QDateTime::currentDateTime();
-    a.firstSeen = a.timestamp;
-    a.lastSeen = a.timestamp;
-    a.severity = processSeverity(sp.severity);
-    a.category = EDR::Category::Process;
-    a.title = QString("Suspicious process: %1").arg(sp.info.name);
-    a.description = sp.reasons.isEmpty() ? QStringLiteral("A suspicious process is running.")
-                                         : sp.reasons.first();
-    a.sourcePath = sp.info.exePath.isEmpty() ? sp.info.name : sp.info.exePath;
-    a.recommendedAction =
-        "Review the process and its origin. Terminate if unfamiliar; "
-        "investigate parent process and command line.";
         EDR::Alert a;
         a.id        = newId();
         a.dedupKey  = key;
