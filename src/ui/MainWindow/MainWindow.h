@@ -36,6 +36,10 @@ class DashboardPage;
 class ThreatDetailPanel;
 class ResultsPage;
 class ScanPage;
+class AlertsPage;
+class QuarantinePage;
+class MonitoringService;
+namespace EDR { struct Alert; }
 
 class MainWindow : public QMainWindow
 {
@@ -242,9 +246,11 @@ private:
         PageResults        = 2,
         PageSystemStatus   = 3,
         PageRootkit        = 4,
-        PageThreatIntel    = 5,
-        PageReports        = 6,
-        PageSettings       = 7,
+        PageAlerts         = 5,    // Phase 4 (EDR-Lite)
+        PageQuarantine     = 6,    // Phase 5 — list + restore quarantined files
+        PageThreatIntel    = 7,
+        PageReports        = 8,
+        PageSettings       = 9,
     };
     Sidebar*            m_sidebar         = nullptr;
     QStackedWidget*     m_pageStack       = nullptr;
@@ -253,6 +259,9 @@ private:
     ThreatDetailPanel*  m_threatDetail    = nullptr;   // Phase 4 Step 3 — right-slide detail panel
     ResultsPage*        m_resultsPage     = nullptr;   // refactored Results tab (page 2)
     ScanPage*           m_scanPage        = nullptr;   // refactored Scan tab (page 1)
+    AlertsPage*        m_alertsPage      = nullptr;   // Phase 4 EDR — Alerts (page 5)
+    QuarantinePage*    m_quarantinePage  = nullptr;   // Phase 5 — Quarantine list + restore (page 6)
+    MonitoringService* m_monitor          = nullptr;   // Phase 4 EDR — periodic ticks
 
     void setupShell();
     QWidget* makePlaceholderPage(const QString& title, const QString& subtitle);
@@ -276,4 +285,15 @@ private slots:
     void onScanPageStartRequested(const QStringList& targets, int depth);
     void onScanPageExportLogs();
     void onScanPageViewAllRecent();
+
+    /// EDR-Lite (Phase 4)
+    void onEdrAlertRaised(const EDR::Alert& alert);
+    void onEdrTickCompleted(int alertsThisTick, int durationMs);
+    void onEdrStateChanged(bool enabled);
+    void onSettingsConfigSaved();
+
+    /// Recompute the dashboard's risk-based security score from the
+    /// MonitoringService's live active-alert set. Called whenever an
+    /// alert is raised, updated, or resolved.
+    void refreshDashboardScore();
 };

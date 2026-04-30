@@ -79,6 +79,30 @@ add_executable(main
     # Phase 4 – Scan page redesign
     src/ui/widgets/DropArea.cpp
     src/ui/pages/ScanPage.cpp
+    # Phase 4 – EDR-Lite continuous monitoring (Beta)
+    src/edr/SnapshotDiff.cpp
+    src/edr/MonitoringService.cpp
+    src/edr/SecurityScoreEngine.cpp     # risk-based scoring (Score.A)
+    src/ui/pages/AlertsPage.cpp
+    # Phase 4 – Alerts UX polish (reusable widgets)
+    src/ui/widgets/SeverityBadge.cpp
+    src/ui/widgets/AlertRow.cpp
+    src/ui/widgets/FilterBar.cpp
+    src/ui/widgets/AlertDetailPanel.cpp
+    # AlertTypes.h + MonitoringService.h need explicit listing for AUTOMOC
+    # because they live under include/ rather than next to the .cpp.
+    include/edr/MonitoringService.h
+    # Phase 5 – Response & Control Layer (Allowlist / Quarantine / ActionLog
+    # / ResponseManager). Self-contained C++17 — no external deps. Wired into
+    # MainWindow + ResultsPage + the scanner allowlist-suppression path.
+    src/response/ResponseTypes.cpp
+    src/response/Allowlist.cpp
+    src/response/Quarantine.cpp
+    src/response/ActionLog.cpp
+    src/response/ResponseManager.cpp
+    src/response/ResponseManagerSingleton.cpp   # process-wide accessor
+    src/ui/ResponsePanel.cpp                    # framework-agnostic helpers
+    src/ui/pages/QuarantinePage.cpp             # Phase 5 — Quarantine list+restore UI
     # Scanner engine – FileScanner.cpp is the AUTOMOC anchor (includes the header
     # so CMake generates moc_FileScanner.cpp). All implementations are in the
     # focused TUs below, compiled with per-file optimization flags.
@@ -96,6 +120,7 @@ add_executable(main
     src/ai/AnomalyDetector.cpp     # ONNX Runtime inference wrapper
     src/ai/LLMExplainer.cpp        # Ollama-based LLM threat explanation
     src/db/ScanDatabase.cpp        # SQLite persistence layer
+    src/db/CacheVersion.cpp        # Phase 5 — model/rules/config invalidation
     src/db/sqlite3.c               # SQLite amalgamation – no install required
     # Phase 1 – YARA + reputation + code signing
     src/scanner/YaraScanner.cpp        # libyara wrapper (3rd detection pass)

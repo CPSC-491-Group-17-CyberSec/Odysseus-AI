@@ -10,9 +10,15 @@
 #include "../pages/SettingsPage.h"
 #include "../pages/ResultsPage.h"
 #include "../pages/ScanPage.h"
+#include "../pages/AlertsPage.h"
+#include "../pages/QuarantinePage.h"
+#include "edr/MonitoringService.h"
+#include "edr/AlertTypes.h"
+#include "edr/SecurityScoreEngine.h"
 #include "ai/LLMExplainer.h"
 #include "ai/FeatureExtractor.h"
 #include "monitor/SystemMonitor.h"
+#include "response/ResponseManagerSingleton.h"   // Phase 5 — process-wide accessor
 
 #include <QStackedWidget>
 #include <QSplitter>
@@ -85,6 +91,24 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle("Odysseus Threat Dashboard");
     resize(1100, 680);
+
+    // ── Phase 5 — prime the response subsystem early so the Allowlist file
+    // is opened (or created) before the first scan runs and the writer
+    // thread for the action log is alive when the user clicks Quarantine.
+    // The call is idempotent and cheap; it just constructs the singleton.
+    {
+        auto& mgr = odysseus::response::globalResponseManager();
+        qInfo().noquote() << "[Response] subsystem ready —"
+                          << "allowlist:" << QString::fromStdString(
+                                 mgr.allowlist().list().empty()
+                                     ? std::string("(empty)")
+                                     : std::to_string(mgr.allowlist().list().size())
+                                       + " entries")
+                          << "| quarantine dir:" << QString::fromStdString(
+                                 mgr.quarantine().quarantineDir())
+                          << "| audit log:"     << QString::fromStdString(
+                                 mgr.actionLog().filePath());
+    }
 
     setupUi();
 
@@ -229,6 +253,8 @@ void MainWindow::setupShell()
     m_sidebar->addItem("Results",           QString::fromUtf8("\xE2\x96\xA4"));   // ▤
     m_sidebar->addItem("System Status",     QString::fromUtf8("\xE2\x97\x8E"));   // ◎
     m_sidebar->addItem("Rootkit Awareness", QString::fromUtf8("\xE2\x9B\xA8"));   // ⛨
+    m_sidebar->addItem("Alerts",            QString::fromUtf8("\xE2\x9A\xA0"));   // ⚠ (Phase 4)
+    m_sidebar->addItem("Quarantine",        QString::fromUtf8("\xE2\x9A\x99"));   // ⚙ (Phase 5)
     m_sidebar->addItem("Threat Intel",      QString::fromUtf8("\xE2\x97\x88"));   // ◈
     m_sidebar->addItem("Reports",           QString::fromUtf8("\xE2\x96\xA8"));   // ▨
     m_sidebar->addItem("Settings",          QString::fromUtf8("\xE2\x9A\x99"));   // ⚙
@@ -293,6 +319,17 @@ void MainWindow::setupShell()
         makePlaceholderPage("Rootkit Awareness",
             "Rootkit-awareness findings appear inside the System Status panel.\n"
             "A dedicated page lands in a future release."));
+
+    // Page 5 — ALERTS (Phase 4 EDR-Lite). Updated live from MonitoringService.
+    m_alertsPage = new AlertsPage();
+    m_pageStack->insertWidget(PageAlerts, m_alertsPage);
+
+    // Page 6 — QUARANTINE (Phase 5). Lists files moved to quarantine and
+    // exposes the Restore action. Reads/writes through ResponseManager so
+    // every restore is captured in the action log.
+    m_quarantinePage = new QuarantinePage();
+    m_pageStack->insertWidget(PageQuarantine, m_quarantinePage);
+
     m_pageStack->insertWidget(PageThreatIntel,
         makePlaceholderPage("Threat Intelligence",
             "Reputation database explorer — coming soon."));
@@ -300,7 +337,7 @@ void MainWindow::setupShell()
         makePlaceholderPage("Reports",
             "Export & report history — coming soon."));
 
-    // Page 7 — SETTINGS: bound to ScannerConfigStore.
+    // Page 9 — SETTINGS: bound to ScannerConfigStore.
     auto* settings = new SettingsPage();
     m_pageStack->insertWidget(PageSettings, settings);
     // Hook up the Clear Cache button using the local 'settings' variable
@@ -351,6 +388,35 @@ void MainWindow::setupShell()
     // fullscreen breaks layout" bug.
     setMinimumSize(1100, 720);
 
+    // ════════════════════════════════════════════════════════════════════
+    //  Phase 4 — EDR-Lite continuous monitoring.
+    //  We always construct the service so the user can toggle it on later
+    //  without restarting the app. start()/stop() is driven by the
+    //  ScannerConfig::edrLiteEnabled flag below + Settings save events.
+    // ════════════════════════════════════════════════════════════════════
+    m_monitor = new MonitoringService(m_sysmon, this);
+    connect(m_monitor, &MonitoringService::alertRaised,
+            this,       &MainWindow::onEdrAlertRaised);
+    connect(m_monitor, &MonitoringService::tickCompleted,
+            this,       &MainWindow::onEdrTickCompleted);
+    connect(m_monitor, &MonitoringService::monitoringStateChanged,
+            this,       &MainWindow::onEdrStateChanged);
+
+    // Dedup engine — alertResolved + alertUpdated forward straight to
+    // the Alerts page (and the Dashboard's score recompute).
+    connect(m_monitor, &MonitoringService::alertResolved,
+            this, [this](const EDR::Alert& a) {
+                if (m_alertsPage) m_alertsPage->markAlertResolved(a);
+                refreshDashboardScore();
+            });
+    connect(m_monitor, &MonitoringService::alertUpdated,
+            this, [this](const EDR::Alert& a) {
+                if (m_alertsPage) m_alertsPage->updateAlert(a);
+                // ticksSeen bumps drive the persistence penalty in the
+                // risk-based score, so recompute every tick.
+                refreshDashboardScore();
+            });
+
     // Stabilization B — hide redundant legacy header + dark-theme the
     // legacy threat table so the Results page matches the rest.
     retireLegacyHeader();
@@ -379,6 +445,16 @@ void MainWindow::setupShell()
         }
         m_scanPage->setRecentScans(m_history);
     }
+
+    // Phase 4 — start MonitoringService if the saved config has it on.
+    // reloadConfig() handles both initial start and the case where the
+    // user toggles the master switch later from the Settings page.
+    if (m_monitor) m_monitor->reloadConfig();
+    if (m_dashboardPage)
+        m_dashboardPage->setEdrStatus(
+            m_monitor && m_monitor->isRunning(),
+            m_monitor ? m_monitor->lastTickAt() : QDateTime{},
+            m_monitor ? m_monitor->alertCount() : 0);
 }
 
 // ============================================================================
@@ -670,6 +746,21 @@ void MainWindow::onSidebarPageRequested(int index)
             m_sysmon->refresh();
         }
     }
+
+    // Phase 5 — Quarantine page: refresh on entry so a quarantine done
+    // in the same session (or a restore performed elsewhere) is reflected.
+    if (index == PageQuarantine && m_quarantinePage) {
+        m_quarantinePage->refresh();
+    }
+
+    // Phase 5 — Settings page: re-pull config + allowlist on entry so
+    // an Ignore done from the Results page is visible immediately.
+    if (index == PageSettings) {
+        if (auto* sp = qobject_cast<SettingsPage*>(
+                m_pageStack->widget(PageSettings))) {
+            sp->reloadFromConfig();
+        }
+    }
 }
 
 // ============================================================================
@@ -741,6 +832,71 @@ void MainWindow::onScanPageViewAllRecent()
 {
     if (m_pageStack) m_pageStack->setCurrentIndex(PageResults);
     if (m_sidebar)   m_sidebar->setActive(PageResults);
+}
+
+// ============================================================================
+//  Phase 4 — EDR-Lite signal handlers
+// ============================================================================
+void MainWindow::onEdrAlertRaised(const EDR::Alert& alert)
+{
+    // Push into the Alerts page (live append)
+    if (m_alertsPage) m_alertsPage->appendAlert(alert);
+
+    // Surface it on the dashboard's Recent Activity feed too
+    if (m_dashboardPage) m_dashboardPage->appendEdrAlert(alert);
+
+    // Recompute risk-based score
+    refreshDashboardScore();
+}
+
+void MainWindow::refreshDashboardScore()
+{
+    if (!m_dashboardPage || !m_monitor) return;
+    const EDR::ScoreReport report =
+        EDR::scoreActiveAlerts(m_monitor->activeAlerts());
+    m_dashboardPage->setSecurityReport(report);
+}
+
+void MainWindow::onEdrTickCompleted(int alertsThisTick, int /*durationMs*/)
+{
+    // Refresh the dashboard EDR status card so the "last check" relative
+    // time reads correctly. Alert count is sourced from MonitoringService.
+    if (m_dashboardPage && m_monitor) {
+        m_dashboardPage->setEdrStatus(m_monitor->isRunning(),
+                                        m_monitor->lastTickAt(),
+                                        m_monitor->alertCount());
+    }
+    // Forward to the Alerts page timeline strip.
+    if (m_alertsPage && m_monitor) {
+        m_alertsPage->setLastTick(m_monitor->lastTickAt(), alertsThisTick);
+    }
+    // Tick boundary — persistence penalty just bumped, score may shift
+    // even with no new alerts.
+    refreshDashboardScore();
+}
+
+void MainWindow::onEdrStateChanged(bool enabled)
+{
+    if (m_dashboardPage && m_monitor) {
+        m_dashboardPage->setEdrStatus(enabled,
+                                        m_monitor->lastTickAt(),
+                                        m_monitor->alertCount());
+    }
+    if (m_alertsPage) {
+        m_alertsPage->setEdrRunning(enabled);
+    }
+    // When EDR turns off the active set is wiped → score returns to 100.
+    refreshDashboardScore();
+    // When EDR is turned off, leave the existing alert history intact
+    // (user may want to review what was found before disabling).
+}
+
+void MainWindow::onSettingsConfigSaved()
+{
+    // The user just hit Save in the Settings page. Re-apply the EDR
+    // toggles immediately so the master switch / interval changes take
+    // effect without a restart.
+    if (m_monitor) m_monitor->reloadConfig();
 }
 
 void MainWindow::onThreatDetailCloseRequested()
