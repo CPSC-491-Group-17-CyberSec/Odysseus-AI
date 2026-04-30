@@ -35,6 +35,7 @@
 #include "ai/ScanResultFormatter.h"
 #include "ai/FileTypeScoring.h"
 #include "core/ScannerConfig.h"
+#include "reputation/CodeSigning.h"   // Phase 5 — gate path-cap on real trust
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -305,22 +306,32 @@ bool checkByAI(const QString& filePath,
                        [](unsigned char c) { return std::tolower(c); });
 
         bool shouldCap = false;
+        bool requireSigning = true;   // Phase 5 — most caps now require trust
         std::string capReason;
 
         // ── Rule 1: Build artifacts ────────────────────────────────────
         // Compiled binaries inside build directories are project outputs,
         // not threats. High entropy + embedded strings are expected.
+        // GATED: only downgrade if the binary is signed/package-trusted —
+        // otherwise an attacker could drop a payload into ~/build/ and
+        // get a free severity reduction. Today most user dev outputs are
+        // unsigned, so this rule rarely fires after the gate; that's the
+        // intended trade-off (safety > convenience for unsigned binaries).
         if (lpath.find("/build/") != std::string::npos ||
             lpath.find("/cmake-build-") != std::string::npos ||
             lpath.find("/cmakefiles/") != std::string::npos)
         {
             shouldCap = true;
             capReason = "Build artifact (in build directory)";
+            requireSigning = true;
         }
 
         // ── Rule 2: Chromium / Electron resource files ─────────────────
-        // .pak files and code-cache entries inside browser/Electron apps
-        // have high entropy, embedded URLs, and base64 by design.
+        // .pak files and code-cache entries are static resources packed
+        // by build tools; they aren't independently signed. They live
+        // inside a containing app bundle that IS signed (and already
+        // trusted by the OS loader). The cap here stays unconditional
+        // because no per-file signing info is available for these.
         if (ext == "pak" ||
             lpath.find("chromium embedded framework") != std::string::npos ||
             lpath.find("code cache")   != std::string::npos ||
@@ -331,12 +342,16 @@ bool checkByAI(const QString& filePath,
         {
             shouldCap = true;
             capReason = "Chromium/Electron resource";
+            requireSigning = false;   // resource files aren't signed
         }
 
         // ── Rule 3: System/app managed directories ─────────────────────
         // Files in Homebrew, Xcode toolchains, system frameworks, and
-        // macOS app bundles are signed and managed by the OS / package
-        // manager.  Flag for review at most, never as Suspicious/Critical.
+        // macOS app bundles are USUALLY signed and managed by the OS
+        // / package manager — but not always. GATED: only downgrade if
+        // CodeSigning actually confirms trust. Closes the previous
+        // bypass where dropping ~/.app/Contents/MacOS/evil would get
+        // an unconditional severity cap.
         if (lpath.find("/cellar/")              != std::string::npos ||
             lpath.find("/homebrew/")            != std::string::npos ||
             lpath.find(".app/contents/macos/")  != std::string::npos ||
@@ -349,22 +364,75 @@ bool checkByAI(const QString& filePath,
         {
             shouldCap = true;
             capReason = "Managed system/app directory";
+            requireSigning = true;
         }
 
-        // Apply the cap: downgrade Suspicious/Critical → Anomalous
+        // Apply the cap: downgrade Suspicious/Critical → Anomalous.
         if (shouldCap &&
             (cr.level == ClassificationLevel::Suspicious ||
              cr.level == ClassificationLevel::Critical))
         {
-            if (ScannerConfigStore::current().verboseLogging) {
-                std::cout << "[POST-CLASS] Downgrading "
-                          << QFileInfo(filePath).fileName().toStdString()
-                          << " from " << classificationToString(cr.level)
-                          << " → Anomalous (" << capReason << ")\n";
+            // Phase 5 — code-signing gate. Only downgrade when the OS /
+            // package manager confirms the file is trusted. Failures
+            // (Unsigned, Unknown, or signing disabled) leave the higher
+            // severity in place.
+            bool gateOpen = !requireSigning;
+            std::string gateReason = "(no signing check needed)";
+            if (requireSigning && ScannerConfigStore::current().codeSigningEnabled) {
+                CodeSigning::Result cs =
+                    CodeSigning::verifyFile(filePath);
+                if (cs.status == CodeSigning::Status::SignedTrusted) {
+                    gateOpen = true;
+                    gateReason = "[trusted: " + cs.signerId.toStdString() + "]";
+                } else if (cs.status == CodeSigning::Status::SignedUntrusted) {
+                    // Linux system-path heuristic OR a signed-but-untrusted
+                    // binary on macOS. Apply a partial downgrade only —
+                    // Critical → Suspicious (not all the way to Anomalous).
+                    if (cr.level == ClassificationLevel::Critical) {
+                        cr.level    = ClassificationLevel::Suspicious;
+                        cr.severity = SeverityLevel::High;
+                        if (ScannerConfigStore::current().verboseLogging) {
+                            std::cout << "[POST-CLASS] Partial downgrade "
+                                      << QFileInfo(filePath).fileName().toStdString()
+                                      << " Critical → Suspicious"
+                                      << " (signed but trust uncertain: "
+                                      << cs.signerId.toStdString() << ")\n";
+                        }
+                    }
+                    // For Suspicious + signed-untrusted, keep as-is — no
+                    // further downgrade because we don't have strong trust.
+                } else {
+                    // Unsigned / Unknown — refuse to downgrade.
+                    if (ScannerConfigStore::current().verboseLogging) {
+                        std::cout << "[POST-CLASS] Refusing path-cap on "
+                                  << QFileInfo(filePath).fileName().toStdString()
+                                  << " — signing status="
+                                  << CodeSigning::statusToText(cs.status).toStdString()
+                                  << " (" << capReason << " path matched "
+                                  << "but no positive trust)\n";
+                    }
+                    gateOpen = false;
+                }
+            } else if (requireSigning && !ScannerConfigStore::current().codeSigningEnabled) {
+                // Code signing disabled in config — fall back to the legacy
+                // path-only behavior so the user's verbose-logging output
+                // doesn't change unexpectedly. Documented as intentional.
+                gateOpen = true;
+                gateReason = "(code-signing disabled — legacy behavior)";
             }
-            cr.level    = ClassificationLevel::Anomalous;
-            cr.severity = SeverityLevel::Low;
-            cr.suppressed = true;
+
+            if (gateOpen) {
+                if (ScannerConfigStore::current().verboseLogging) {
+                    std::cout << "[POST-CLASS] Downgrading "
+                              << QFileInfo(filePath).fileName().toStdString()
+                              << " from " << classificationToString(cr.level)
+                              << " → Anomalous (" << capReason << ") "
+                              << gateReason << "\n";
+                }
+                cr.level    = ClassificationLevel::Anomalous;
+                cr.severity = SeverityLevel::Low;
+                cr.suppressed = true;
+            }
         }
     }
 
