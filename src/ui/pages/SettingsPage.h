@@ -14,6 +14,7 @@
 class ToggleRow;
 class QPushButton;
 class QLabel;
+class QListWidget;
 
 class SettingsPage : public QWidget
 {
@@ -37,6 +38,16 @@ private slots:
     void onResetClicked();
     void markDirty(bool /*ignored*/);
     void onClearCacheClicked();
+
+    // Phase 5 — Allowlist editor (lives in this page so we don't add
+    // a whole new sidebar entry just for the list).
+    void onAllowlistRefreshClicked();
+    void onAllowlistRemoveClicked();
+    void onAllowlistSelectionChanged();
+
+private:
+    void rebuildAllowlistView();
+    void setAllowlistStatus(const QString& msg, bool isError);
 
 private:
     void buildUi();
@@ -62,6 +73,21 @@ private:
 
     // ── Diagnostics ────────────────────────────────────────────────────
     ToggleRow*  m_verboseLogging    = nullptr;
+
+    // ── EDR-Lite Monitoring (Beta) — Phase 4 ───────────────────────────
+    ToggleRow*  m_edrEnabled              = nullptr;
+    class QComboBox* m_edrInterval        = nullptr;
+    ToggleRow*  m_edrAlertNewProcess      = nullptr;
+    ToggleRow*  m_edrAlertNewPersistence  = nullptr;
+    ToggleRow*  m_edrAlertIntegrity       = nullptr;
+    ToggleRow*  m_edrAlertKernelExt       = nullptr;
+
+    // ── Allowlist Editor — Phase 5 ─────────────────────────────────────
+    QListWidget* m_allowlistView   = nullptr;
+    QPushButton* m_allowlistRemove = nullptr;
+    QPushButton* m_allowlistRefresh = nullptr;
+    QLabel*      m_allowlistStatus = nullptr;
+    QLabel*      m_allowlistEmpty  = nullptr;
 
     // ── Footer ─────────────────────────────────────────────────────────
     QPushButton* m_saveBtn   = nullptr;

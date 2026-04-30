@@ -31,6 +31,11 @@
 #include "../widgets/ToggleRow.h"
 #include "../../../include/core/ScannerConfig.h"
 
+// Phase 5 — Allowlist editor
+#include "response/ResponseManagerSingleton.h"
+#include "response/ResponseManager.h"
+#include "response/ResponseTypes.h"
+
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -40,6 +45,7 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QTimer>
+<<<<<<< HEAD
 #include <QApplication>
 #include <QPainter>
 #include <QStyleOption>
@@ -116,6 +122,10 @@ protected:
         }
     }
 };
+=======
+#include <QComboBox>
+#include <QListWidget>
+>>>>>>> 8c5b12c (P3: Allowlist editor section (SHA-256 first, remove via ResponseManager))
 
 namespace {
 
@@ -276,6 +286,7 @@ void SettingsPage::buildUi()
         appendToggle(sec, m_verboseLogging);
     }
 
+<<<<<<< HEAD
     // ── Data & Storage ─────────────────────────────────────────────────
     {
         QVBoxLayout* sec = nullptr;
@@ -306,6 +317,188 @@ void SettingsPage::buildUi()
         btnLay->addStretch();
 
         sec->addLayout(btnLay);
+=======
+    // ── Section: EDR-Lite Monitoring (Beta) — Phase 4 ─────────────────
+    {
+        QVBoxLayout* sec = nullptr;
+        main->addWidget(makeSectionCard("EDR-Lite Monitoring (Beta)",
+                                          content, &sec));
+
+        m_edrEnabled = new ToggleRow("Enable EDR-Lite Monitoring",
+            "Periodically snapshot the system and raise alerts on changes. "
+            "Read-only — never quarantines or kills processes.");
+        appendToggle(sec, m_edrEnabled);
+
+        // Interval selector — combobox of preset intervals so users don't
+        // type an absurdly small value. Stored as int seconds in config.
+        auto* intervalRow = new QFrame();
+        intervalRow->setStyleSheet("background: transparent;");
+        auto* irLayout = new QHBoxLayout(intervalRow);
+        irLayout->setContentsMargins(0, 8, 0, 8);
+        irLayout->setSpacing(16);
+
+        auto* lbl = new QVBoxLayout();
+        lbl->setSpacing(2);
+        auto* k = new QLabel("Monitoring Interval");
+        k->setStyleSheet(QString("QLabel { color: %1; %2 background: transparent; }")
+                              .arg(Theme::Color::textPrimary)
+                              .arg(Theme::Type::qss(Theme::Type::Body,
+                                                      Theme::Type::WeightSemi)));
+        auto* d = new QLabel("How often to capture system snapshots and "
+                              "compare against the previous one.");
+        d->setStyleSheet(QString("QLabel { color: %1; %2 background: transparent; }")
+                              .arg(Theme::Color::textSecondary)
+                              .arg(Theme::Type::qss(Theme::Type::Caption)));
+        d->setWordWrap(true);
+        lbl->addWidget(k);
+        lbl->addWidget(d);
+        irLayout->addLayout(lbl, 1);
+
+        m_edrInterval = new QComboBox(intervalRow);
+        m_edrInterval->setMinimumWidth(140);
+        m_edrInterval->setStyleSheet(QString(
+            "QComboBox {"
+            "  background-color: %1; color: %2;"
+            "  border: 1px solid %3; border-radius: 8px;"
+            "  padding: 8px 12px; %4"
+            "}"
+            "QComboBox::drop-down { border: none; width: 24px; }"
+            "QComboBox QAbstractItemView {"
+            "  background-color: %1; color: %2;"
+            "  selection-background-color: %5; border: 1px solid %3;"
+            "}"
+        ).arg(Theme::Color::bgSecondary, Theme::Color::textPrimary,
+              Theme::Color::borderSubtle)
+         .arg(Theme::Type::qss(Theme::Type::Body))
+         .arg(Theme::Color::accentBlueSoft));
+        m_edrInterval->addItem("15 seconds", 15);
+        m_edrInterval->addItem("30 seconds", 30);
+        m_edrInterval->addItem("1 minute",   60);
+        m_edrInterval->addItem("5 minutes",  300);
+        m_edrInterval->addItem("15 minutes", 900);
+        connect(m_edrInterval, &QComboBox::currentIndexChanged,
+                this, &SettingsPage::markDirty);
+        irLayout->addWidget(m_edrInterval);
+        sec->addWidget(intervalRow);
+
+        m_edrAlertNewProcess = new ToggleRow("Alert on new suspicious process",
+            "Raise an alert when a new process appears that matches the "
+            "Phase 2 suspicious-process heuristics.");
+        appendToggle(sec, m_edrAlertNewProcess);
+
+        m_edrAlertNewPersistence = new ToggleRow("Alert on new persistence item",
+            "Raise an alert when a new LaunchAgent / cron / systemd entry "
+            "or Windows Run-key entry appears.");
+        appendToggle(sec, m_edrAlertNewPersistence);
+
+        m_edrAlertIntegrity = new ToggleRow("Alert on integrity mismatch",
+            "Raise an alert when a critical system binary's SHA-256 differs "
+            "from its baseline under the same OS version.");
+        appendToggle(sec, m_edrAlertIntegrity);
+
+        m_edrAlertKernelExt = new ToggleRow(
+            "Alert on kernel/system extension change",
+            "Raise an alert when a new kernel module / system extension "
+            "appears, or a process cross-view mismatch is detected.");
+        appendToggle(sec, m_edrAlertKernelExt);
+    }
+
+    // ── Section: Allowlist Editor — Phase 5 ────────────────────────────
+    // Lives inside Settings (not its own sidebar entry) because it's
+    // small and rarely-used. Sources entries from the global Allowlist
+    // and routes removals through ResponseManager so they're audited.
+    {
+        QVBoxLayout* sec = nullptr;
+        main->addWidget(makeSectionCard("Allowlist", content, &sec));
+
+        auto* desc = new QLabel(
+            "Files added to the allowlist are suppressed in future scans. "
+            "Hash-based entries (preferred) match by SHA-256; path-based "
+            "entries match by location. Removing an entry will cause the "
+            "file to be re-evaluated on the next scan.",
+            content);
+        desc->setStyleSheet(QString(
+            "QLabel { color: %1; %2 background: transparent; padding-bottom: 8px; }")
+                .arg(Theme::Color::textSecondary)
+                .arg(Theme::Type::qss(Theme::Type::Caption)));
+        desc->setWordWrap(true);
+        sec->addWidget(desc);
+
+        // List + side controls.
+        auto* row = new QHBoxLayout();
+        row->setSpacing(12);
+
+        m_allowlistView = new QListWidget(content);
+        m_allowlistView->setStyleSheet(QString(
+            "QListWidget { background-color: %1; color: %2;"
+            " border: 1px solid %3; border-radius: 8px; padding: 4px; }"
+            "QListWidget::item { padding: 6px; border-radius: 4px; }"
+            "QListWidget::item:selected { background-color: %4; color: white; }"
+        ).arg(Theme::Color::bgSecondary, Theme::Color::textPrimary,
+              Theme::Color::borderSubtle, Theme::Color::accentBlue));
+        m_allowlistView->setMinimumHeight(180);
+        connect(m_allowlistView, &QListWidget::itemSelectionChanged,
+                this, &SettingsPage::onAllowlistSelectionChanged);
+        row->addWidget(m_allowlistView, 1);
+
+        // Side action column.
+        auto* sideCol = new QVBoxLayout();
+        sideCol->setSpacing(8);
+
+        m_allowlistRefresh = new QPushButton("Refresh", content);
+        m_allowlistRefresh->setCursor(Qt::PointingHandCursor);
+        m_allowlistRefresh->setStyleSheet(QString(
+            "QPushButton { background: transparent; color: %1;"
+            " border: 1px solid %2; border-radius: 8px;"
+            " padding: 8px 14px; %3 }"
+            "QPushButton:hover { background-color: %4; color: white; }"
+        ).arg(Theme::Color::textPrimary, Theme::Color::borderSubtle)
+         .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi))
+         .arg(Theme::Color::accentBlueSoft));
+        connect(m_allowlistRefresh, &QPushButton::clicked,
+                this, &SettingsPage::onAllowlistRefreshClicked);
+        sideCol->addWidget(m_allowlistRefresh);
+
+        m_allowlistRemove = new QPushButton("Remove selected", content);
+        m_allowlistRemove->setCursor(Qt::PointingHandCursor);
+        m_allowlistRemove->setEnabled(false);
+        m_allowlistRemove->setStyleSheet(QString(
+            "QPushButton { background-color: %1; color: white; border: none;"
+            " border-radius: 8px; padding: 9px 14px; %2 }"
+            "QPushButton:hover { background-color: %3; }"
+            "QPushButton:disabled { background-color: %4; color: %5; }"
+        ).arg(Theme::Color::accentBlue)
+         .arg(Theme::Type::qss(Theme::Type::Body, Theme::Type::WeightSemi))
+         .arg(Theme::Color::accentBlueHover)
+         .arg(Theme::Color::bgSecondary)
+         .arg(Theme::Color::textMuted));
+        connect(m_allowlistRemove, &QPushButton::clicked,
+                this, &SettingsPage::onAllowlistRemoveClicked);
+        sideCol->addWidget(m_allowlistRemove);
+
+        sideCol->addStretch(1);
+        row->addLayout(sideCol);
+
+        sec->addLayout(row);
+
+        m_allowlistEmpty = new QLabel(
+            "Allowlist is empty. Use the Ignore button on a finding to add "
+            "an entry.", content);
+        m_allowlistEmpty->setStyleSheet(QString(
+            "QLabel { color: %1; %2 background: transparent;"
+            " padding: 12px 4px; }")
+                .arg(Theme::Color::textMuted)
+                .arg(Theme::Type::qss(Theme::Type::Caption)));
+        m_allowlistEmpty->setWordWrap(true);
+        sec->addWidget(m_allowlistEmpty);
+
+        m_allowlistStatus = new QLabel(content);
+        m_allowlistStatus->setVisible(false);
+        m_allowlistStatus->setWordWrap(true);
+        sec->addWidget(m_allowlistStatus);
+
+        rebuildAllowlistView();
+>>>>>>> 8c5b12c (P3: Allowlist editor section (SHA-256 first, remove via ResponseManager))
     }
 
     // ── Footer: config path + actions ──────────────────────────────────
@@ -384,6 +577,9 @@ void SettingsPage::buildUi()
         m_systemMonitoring, m_processScan, m_persistenceScan, m_processHeuristics,
         m_rootkit, m_crossView, m_kextCheck, m_integrity,
         m_verboseLogging,
+        // Phase 4 (EDR-Lite)
+        m_edrEnabled, m_edrAlertNewProcess, m_edrAlertNewPersistence,
+        m_edrAlertIntegrity, m_edrAlertKernelExt,
     };
     for (ToggleRow* r : all)
         connect(r, &ToggleRow::toggled, this, &SettingsPage::markDirty);
@@ -418,7 +614,30 @@ void SettingsPage::reloadFromConfig()
 
     m_verboseLogging   ->setChecked(cfg.verboseLogging);
 
+    // Phase 4 (EDR-Lite)
+    m_edrEnabled            ->setChecked(cfg.edrLiteEnabled);
+    m_edrAlertNewProcess    ->setChecked(cfg.alertOnNewProcess);
+    m_edrAlertNewPersistence->setChecked(cfg.alertOnNewPersistence);
+    m_edrAlertIntegrity     ->setChecked(cfg.alertOnIntegrityMismatch);
+    m_edrAlertKernelExt     ->setChecked(cfg.alertOnKernelExtensionChange);
+    if (m_edrInterval) {
+        // Find the closest preset to the stored interval. If the user has
+        // hand-edited the JSON to an unusual value, default to 15s.
+        int idx = 0;
+        for (int i = 0; i < m_edrInterval->count(); ++i) {
+            if (m_edrInterval->itemData(i).toInt() == cfg.monitoringIntervalSeconds) {
+                idx = i; break;
+            }
+        }
+        m_edrInterval->setCurrentIndex(idx);
+    }
+
     m_pathLabel->setText(QString("Config file: %1").arg(ScannerConfigStore::configPath()));
+
+    // Phase 5 — refresh the allowlist view so freshly-added entries
+    // (added from elsewhere in the app, e.g. ResultsPage Ignore) appear
+    // when the user opens Settings.
+    rebuildAllowlistView();
 
     m_dirty = false;
     applyDirtyState();
@@ -457,6 +676,18 @@ void SettingsPage::onSaveClicked()
     c.integrityCheckEnabled             = m_integrity->isChecked();
 
     c.verboseLogging                    = m_verboseLogging->isChecked();
+
+    // Phase 4 (EDR-Lite)
+    c.edrLiteEnabled                    = m_edrEnabled->isChecked();
+    c.alertOnNewProcess                 = m_edrAlertNewProcess->isChecked();
+    c.alertOnNewPersistence             = m_edrAlertNewPersistence->isChecked();
+    c.alertOnIntegrityMismatch          = m_edrAlertIntegrity->isChecked();
+    c.alertOnKernelExtensionChange      = m_edrAlertKernelExt->isChecked();
+    if (m_edrInterval) {
+        bool ok = false;
+        const int sec = m_edrInterval->currentData().toInt(&ok);
+        c.monitoringIntervalSeconds = (ok && sec > 0) ? sec : 15;
+    }
 
     // Preserve fields the page doesn't expose (experimentalSubdir,
     // maxCompileErrors).
@@ -503,6 +734,7 @@ void SettingsPage::onResetClicked()
     });
 }
 
+<<<<<<< HEAD
 void SettingsPage::onClearCacheClicked()
 {
     // QString roaming = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -523,3 +755,167 @@ void SettingsPage::onClearCacheClicked()
     
     overlay->show();
 }
+=======
+// ============================================================================
+//  Phase 5 — Allowlist editor slots
+// ============================================================================
+
+namespace {
+QString allowlistKindLabel(odysseus::response::AllowlistEntry::Kind k)
+{
+    using K = odysseus::response::AllowlistEntry::Kind;
+    switch (k) {
+        case K::FileSha256:        return QStringLiteral("SHA-256");
+        case K::FilePath:          return QStringLiteral("File path");
+        case K::ProcessPath:       return QStringLiteral("Process path");
+        case K::PersistenceLabel:  return QStringLiteral("Persistence label");
+        case K::PersistencePath:   return QStringLiteral("Persistence path");
+        case K::AlertSignatureKey: return QStringLiteral("Alert signature");
+    }
+    return QStringLiteral("Unknown");
+}
+}
+
+void SettingsPage::rebuildAllowlistView()
+{
+    if (!m_allowlistView) return;
+    m_allowlistView->clear();
+    setAllowlistStatus({}, false);
+
+    namespace R = odysseus::response;
+    auto entries = R::globalResponseManager().allowlist().list();
+
+    // Sort: SHA-256 entries first (preferred form), then by kind name,
+    // then by value. This matches the spec's "prefer SHA-256" guidance.
+    std::sort(entries.begin(), entries.end(),
+        [](const R::AllowlistEntry& a, const R::AllowlistEntry& b) {
+            const bool aIsSha = (a.kind == R::AllowlistEntry::Kind::FileSha256);
+            const bool bIsSha = (b.kind == R::AllowlistEntry::Kind::FileSha256);
+            if (aIsSha != bIsSha) return aIsSha;     // SHA-256 first
+            if (a.kind != b.kind) return static_cast<int>(a.kind)
+                                      < static_cast<int>(b.kind);
+            return a.value < b.value;
+        });
+
+    for (const auto& e : entries) {
+        const QString kindLabel = allowlistKindLabel(e.kind);
+        QString value = QString::fromStdString(e.value);
+        // Truncate very long values for the row text. Full value stays
+        // in the item tooltip + UserRole for the remove call.
+        QString display = value;
+        if (display.length() > 64)
+            display = display.left(40) + "..." + display.right(20);
+
+        auto* item = new QListWidgetItem(
+            QString("[%1]   %2").arg(kindLabel, display),
+            m_allowlistView);
+        item->setToolTip(value);
+        item->setData(Qt::UserRole,     static_cast<int>(e.kind));
+        item->setData(Qt::UserRole + 1, value);
+    }
+
+    const bool empty = entries.empty();
+    if (m_allowlistEmpty)  m_allowlistEmpty->setVisible(empty);
+    if (m_allowlistRemove) m_allowlistRemove->setEnabled(false);
+}
+
+void SettingsPage::onAllowlistRefreshClicked()
+{
+    rebuildAllowlistView();
+}
+
+void SettingsPage::onAllowlistSelectionChanged()
+{
+    setAllowlistStatus({}, false);
+    if (!m_allowlistView || !m_allowlistRemove) return;
+    m_allowlistRemove->setEnabled(m_allowlistView->currentItem() != nullptr);
+}
+
+void SettingsPage::onAllowlistRemoveClicked()
+{
+    if (!m_allowlistView) return;
+    auto* item = m_allowlistView->currentItem();
+    if (!item) return;
+
+    namespace R = odysseus::response;
+    const auto kindInt = item->data(Qt::UserRole).toInt();
+    const auto kind    = static_cast<R::AllowlistEntry::Kind>(kindInt);
+    const QString value = item->data(Qt::UserRole + 1).toString();
+
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle("Remove allowlist entry");
+    box.setText("Remove this entry from the allowlist?");
+    box.setInformativeText(QString(
+        "<b>%1</b><br><br><code>%2</code><br><br>"
+        "The matching file will be re-evaluated on the next scan.")
+            .arg(allowlistKindLabel(kind),
+                 value.toHtmlEscaped()));
+    box.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Cancel);
+    if (box.exec() != QMessageBox::Yes) return;
+
+    R::ActionRequest req;
+    req.action          = R::ActionType::RemoveFromAllowlist;
+    req.userConfirmed   = true;
+    req.target.kind     = (kind == R::AllowlistEntry::Kind::ProcessPath
+                            ? R::TargetKind::Process
+                            : R::TargetKind::File);
+    // Populate the field that ResponseManager::executeRemoveFromAllowlist
+    // consults for this kind.
+    switch (kind) {
+        case R::AllowlistEntry::Kind::FileSha256:
+            req.target.sha256 = value.toStdString(); break;
+        case R::AllowlistEntry::Kind::FilePath:
+            req.target.path   = value.toStdString();
+            req.target.kind   = R::TargetKind::File;  break;
+        case R::AllowlistEntry::Kind::ProcessPath:
+            req.target.path   = value.toStdString();
+            req.target.kind   = R::TargetKind::Process; break;
+        case R::AllowlistEntry::Kind::PersistenceLabel:
+            req.target.label  = value.toStdString();
+            req.target.kind   = R::TargetKind::Persistence; break;
+        case R::AllowlistEntry::Kind::PersistencePath:
+            req.target.path   = value.toStdString();
+            req.target.kind   = R::TargetKind::Persistence; break;
+        case R::AllowlistEntry::Kind::AlertSignatureKey:
+            req.target.signatureKey = value.toStdString(); break;
+    }
+    req.reason = "User-initiated removal from Settings page";
+
+    R::ActionResult res = R::globalResponseManager().execute(req);
+    if (res.success) {
+        setAllowlistStatus(QString("Removed: %1").arg(value), false);
+        rebuildAllowlistView();
+    } else {
+        const std::string err = res.errorMessage.empty() ? res.message
+                                                          : res.errorMessage;
+        setAllowlistStatus(QString("Remove failed: %1")
+                                 .arg(QString::fromStdString(err)), true);
+    }
+}
+
+void SettingsPage::setAllowlistStatus(const QString& msg, bool isError)
+{
+    if (!m_allowlistStatus) return;
+    if (msg.isEmpty()) {
+        m_allowlistStatus->setVisible(false);
+        m_allowlistStatus->clear();
+        return;
+    }
+    m_allowlistStatus->setVisible(true);
+    m_allowlistStatus->setText(msg);
+    m_allowlistStatus->setStyleSheet(QString(
+        "QLabel { color: %1; %2 background: transparent; padding-top: 6px; }")
+            .arg(isError ? Theme::Color::severityCritical
+                          : Theme::Color::severitySafe)
+            .arg(Theme::Type::qss(Theme::Type::Caption,
+                                    Theme::Type::WeightSemi)));
+    QTimer::singleShot(4000, m_allowlistStatus, [this]() {
+        if (m_allowlistStatus) {
+            m_allowlistStatus->setVisible(false);
+            m_allowlistStatus->clear();
+        }
+    });
+}
+>>>>>>> 8c5b12c (P3: Allowlist editor section (SHA-256 first, remove via ResponseManager))
