@@ -108,6 +108,7 @@ class ScanPage : public QWidget {
   QLabel*       m_progressPhase = nullptr;   // "Scanning…" / "Scan Complete"
   QLabel*       m_progressPct   = nullptr;   // mirrors the bar value
   QLabel*       m_elapsedLabel  = nullptr;   // "Elapsed: 00:45"
+  QLabel*       m_progressSummary = nullptr; // ISSUE 6 — final summary line
   QTimer*       m_elapsedTimer  = nullptr;
   QDateTime     m_scanStarted;
 

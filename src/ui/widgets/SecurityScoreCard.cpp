@@ -142,10 +142,27 @@ SecurityScoreCard::SecurityScoreCard(QWidget* parent)
   v->setContentsMargins(20, 16, 20, 16);
   v->setSpacing(8);
 
-  auto* title = new QLabel("System Security Score", this);
+  // The score is computed from active EDR-Lite alerts only (see
+  // SecurityScoreEngine::scoreActiveAlerts). It does NOT factor in
+  // file-scan findings. Naming it "System Security Score" was
+  // misleading — it could read 100 / Secure while the dashboard's
+  // STATUS card simultaneously said "At Risk" because of recent scan
+  // findings. The renamed title makes the runtime-vs-scan distinction
+  // explicit, and the italic subtitle below repeats it for users who
+  // skim past the title.
+  auto* title = new QLabel("Real-Time Protection Score (EDR-Lite)", this);
   title->setStyleSheet(
       QString("color: %1; font-size: 16px; font-weight: 700;").arg(Theme::Color::textPrimary));
   v->addWidget(title);
+
+  auto* scope = new QLabel(
+      "Reflects live system monitoring only — does not include file scan results.",
+      this);
+  scope->setWordWrap(true);
+  scope->setStyleSheet(
+      QString("color: %1; font-size: 11px; font-style: italic;")
+          .arg(Theme::Color::textSecondary));
+  v->addWidget(scope);
 
   // ── Gauge (the score number is now drawn inside the arc) ───────────
   m_gauge = new ScoreGauge(this);
@@ -223,7 +240,12 @@ SecurityScoreCard::SecurityScoreCard(QWidget* parent)
   m_chartView->setFixedHeight(60);
   v->addWidget(m_chartView);
 
-  setScore(0);
+  // ── ISSUE 1 FIX ── default to 100 (Secure) instead of 0 (Critical).
+  // Before: if EDR-Lite was disabled or hadn't ticked yet, the gauge
+  // showed 0 / Critical even though there were no active alerts. Now
+  // the resting state matches "no findings → Secure", and any later
+  // setReport() / setScore() call updates it from there.
+  setScore(100);
 }
 
 void SecurityScoreCard::setScore(int score) {

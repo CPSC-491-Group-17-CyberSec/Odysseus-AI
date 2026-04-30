@@ -60,6 +60,12 @@ class ResultsPage : public QWidget {
   /// Reset all rows and detail panel.
   void clear();
 
+  /// BUG-FIX 2 — total files analyzed by the scanner (NOT the count of
+  /// flagged findings). Drives the FILES SCANNED KPI card. MainWindow
+  /// calls this from onScanFinished with the real `totalScanned` value
+  /// from FileScanner::scanFinished.
+  void setFilesScanned(int total);
+
  signals:
   void exportRequested();
 
@@ -129,4 +135,8 @@ class ResultsPage : public QWidget {
   QVector<SuspiciousFile> m_findings;
   QVector<ThreatRow*> m_rows;
   int m_selectedIndex = -1;
+  // BUG-FIX 2 — distinct from m_findings.size(); reflects the total
+  // file count from FileScanner::scanFinished. Negative ⇒ "not yet known"
+  // and recomputeStats falls back to "—" rather than misreporting.
+  int m_filesScannedTotal = -1;
 };

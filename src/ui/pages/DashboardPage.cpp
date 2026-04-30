@@ -70,10 +70,17 @@ DashboardPage::DashboardPage(QWidget* parent)
   auto* kpis = new QHBoxLayout();
   kpis->setSpacing(16);
 
+  // ── ISSUE 2 ── card retitled "Scan Status".
+  // The previous title "System Status" + value "At Risk" implied
+  // active machine compromise. This card actually summarises the
+  // most recent file-scan results — not real-time monitoring. The
+  // EDR-Lite card and Real-Time Protection Score above cover
+  // runtime-monitoring state. Renaming + softer wording prevents
+  // demo viewers from interpreting a scan finding as live malware.
   m_cardStatus = new StatCard(content);
-  m_cardStatus->setTitle("System Status");
-  m_cardStatus->setValue("Protected");
-  m_cardStatus->setSubtitle("Your system is secure");
+  m_cardStatus->setTitle("Scan Status");
+  m_cardStatus->setValue("Clean");
+  m_cardStatus->setSubtitle("No findings yet");
   m_cardStatus->setIcon(QString::fromUtf8("\xE2\x9C\x93"));
   m_cardStatus->setTone(StatCard::Safe);
   kpis->addWidget(m_cardStatus, 1);
@@ -234,18 +241,26 @@ void DashboardPage::refresh(
   }
 
   // ── KPI cards ──────────────────────────────────────────────────────
-  if (criticalN > 0) {
+  // ISSUE 2 — wording softened. "Findings Detected" (a fact about scan
+  // results) replaces "At Risk" (which implied live compromise). The
+  // EDR-Lite card and Real-Time Protection Score continue to surface
+  // runtime monitoring state independently.
+  if (criticalN > 0 || suspN > 0) {
     m_cardStatus->setTone(StatCard::Critical);
-    m_cardStatus->setValue("At Risk");
-    m_cardStatus->setSubtitle("Critical threats detected — review immediately.");
+    m_cardStatus->setValue("Findings Detected");
+    m_cardStatus->setSubtitle("Review scan results");
   } else if (scannerRunning) {
     m_cardStatus->setTone(StatCard::Info);
     m_cardStatus->setValue("Scanning");
     m_cardStatus->setSubtitle("Scan in progress…");
+  } else if (lowN > 0) {
+    m_cardStatus->setTone(StatCard::Warning);
+    m_cardStatus->setValue("Needs Review");
+    m_cardStatus->setSubtitle("Soft signals only — review when convenient");
   } else {
     m_cardStatus->setTone(StatCard::Safe);
-    m_cardStatus->setValue("Protected");
-    m_cardStatus->setSubtitle("Your system is secure");
+    m_cardStatus->setValue("Clean");
+    m_cardStatus->setSubtitle("Last scan: no findings");
   }
 
   m_cardCritical->setValue(QString::number(criticalN));
@@ -257,7 +272,33 @@ void DashboardPage::refresh(
   if (!history.isEmpty())
     totalScanned = history.first().totalScanned;
   m_cardScanned->setValue(severitySafeNum(totalScanned));
-  m_cardScanned->setSubtitle("Total scanned files");
+
+  // ── ISSUE 6 FIX ── scan-summary clarity. Replace the static
+  // "Total scanned files" subtitle with a one-line summary that ties
+  // the four facts together: how many files, how many findings, how
+  // many were Critical / Needs-Review, and how long the scan took.
+  // This eliminates ambiguity about which scan the dashboard is
+  // showing and makes the credibility-affecting numbers checkable
+  // at a glance during the demo.
+  if (!history.isEmpty()) {
+    const ScanRecord& latest = history.first();
+    const int findings = latest.criticalCount + latest.suspiciousOnly + latest.reviewCount;
+    const int mins = latest.elapsedSeconds / 60;
+    const int secs = latest.elapsedSeconds % 60;
+    QString durationStr;
+    if (mins > 0)
+      durationStr = QString("%1m %2s").arg(mins).arg(secs);
+    else
+      durationStr = QString("%1s").arg(secs);
+    m_cardScanned->setSubtitle(
+        QString("%1 findings (%2 critical, %3 review) • %4")
+            .arg(findings)
+            .arg(latest.criticalCount)
+            .arg(latest.reviewCount)
+            .arg(durationStr));
+  } else {
+    m_cardScanned->setSubtitle("No scans yet");
+  }
 
   // ── Donut + legend ────────────────────────────────────────────────
   const int cleanN = qMax(0, totalScanned - criticalN - suspN - lowN);
@@ -274,18 +315,40 @@ void DashboardPage::refresh(
 
   auto* overview = qobject_cast<QFrame*>(property("__overview").value<QObject*>());
   if (overview) {
-    auto setLegend = [overview](const char* prop, int v, int total) {
+    // ── ISSUE 3 FIX ── percentages must use totalScanned as the
+    // denominator AND surface non-zero sub-1% values as "<1%" instead
+    // of rounding to 0%. Before: 44 critical / 381,526 scanned showed
+    // "44 (0%)" — read as "this number is meaningless". Now it shows
+    // "44 (<1%)" which is honest. Buckets ≥ 1% display whole-percent;
+    // the Clean bucket gets one decimal so 99.99% doesn't round to
+    // 100% when there ARE findings.
+    auto setLegend = [overview](const char* prop, int v, int total, bool isClean) {
       auto* lab = qobject_cast<QLabel*>(overview->property(prop).value<QObject*>());
       if (!lab)
         return;
-      const double pct = total > 0 ? 100.0 * v / total : 0.0;
-      lab->setText(QString("%1 (%2%)").arg(v).arg(QString::number(pct, 'f', total > 0 ? 0 : 0)));
+      QString pctStr;
+      if (total <= 0) {
+        pctStr = "0%";
+      } else if (v == 0) {
+        pctStr = "0%";
+      } else {
+        const double pct = 100.0 * double(v) / double(total);
+        if (pct < 1.0) {
+          pctStr = "<1%";
+        } else if (isClean && pct > 99.0 && pct < 100.0) {
+          // Avoid the misleading "100%" when there are non-Clean findings.
+          pctStr = QString::number(pct, 'f', 1) + "%";
+        } else {
+          pctStr = QString::number(int(pct + 0.5)) + "%";
+        }
+      }
+      lab->setText(QString("%1 (%2)").arg(v).arg(pctStr));
     };
     const int totalAll = totalThreats + cleanN;
-    setLegend("__legCrit", criticalN, totalAll);
-    setLegend("__legSusp", suspN, totalAll);
-    setLegend("__legLow", lowN, totalAll);
-    setLegend("__legClean", cleanN, totalAll);
+    setLegend("__legCrit",  criticalN, totalAll, /*isClean=*/false);
+    setLegend("__legSusp",  suspN,     totalAll, /*isClean=*/false);
+    setLegend("__legLow",   lowN,      totalAll, /*isClean=*/false);
+    setLegend("__legClean", cleanN,    totalAll, /*isClean=*/true);
   }
 
   // ── Activity list (Stabilization D) ───────────────────────────────
@@ -303,16 +366,20 @@ void DashboardPage::refresh(
              : (c == "SUSPICIOUS") ? ActivityList::Warning
                                    : ActivityList::Info;
 
-    // Sentence-cased title: "Critical threat detected: foo.exe"
+    // ── ISSUE 4 FIX ── soften wording so a *scan finding* doesn't read
+    // like an active malware execution alert. The dashboard's Recent
+    // Activity stream mixes scan results with EDR-Lite events; keep the
+    // "Scan finding:" prefix so the user knows this came from a static
+    // scan, not from runtime detection.
     QString severityLabel;
     if (c == "CRITICAL")
-      severityLabel = "Critical threat detected";
+      severityLabel = "Scan finding: Critical file detected";
     else if (c == "SUSPICIOUS")
-      severityLabel = "Suspicious file detected";
+      severityLabel = "Scan finding: Suspicious file detected";
     else if (c == "ANOMALOUS")
-      severityLabel = "Anomalous file detected";
+      severityLabel = "Scan finding: Anomalous file detected";
     else
-      severityLabel = "Threat detected";
+      severityLabel = "Scan finding";
 
     e.title = QString("%1: %2").arg(severityLabel, sf.fileName);
     e.subtitle = sf.filePath;
