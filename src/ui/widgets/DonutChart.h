@@ -14,13 +14,14 @@
 // label layout); chart's built-in legend is hidden.
 // ============================================================================
 
-#include <QWidget>
-#include <QString>
 #include <QColor>
+#include <QString>
 #include <QVector>
+#include <QWidget>
 
 QT_BEGIN_NAMESPACE
-namespace QtCharts { /* Qt6 puts QChart in global namespace */ }
+namespace QtCharts { /* Qt6 puts QChart in global namespace */
+}
 QT_END_NAMESPACE
 
 class QChartView;
@@ -28,29 +29,28 @@ class QChart;
 class QPieSeries;
 class QLabel;
 
-class DonutChart : public QWidget
-{
-    Q_OBJECT
-public:
-    struct Slice {
-        QString label;
-        int     value = 0;
-        QColor  color;
-    };
+class DonutChart : public QWidget {
+  Q_OBJECT
+ public:
+  struct Slice {
+    QString label;
+    int value = 0;
+    QColor color;
+  };
 
-    explicit DonutChart(QWidget* parent = nullptr);
+  explicit DonutChart(QWidget* parent = nullptr);
 
-    void setSlices(const QVector<Slice>& slices);
-    void setCenterValue(const QString& v);
-    void setCenterLabel(const QString& l);
+  void setSlices(const QVector<Slice>& slices);
+  void setCenterValue(const QString& v);
+  void setCenterLabel(const QString& l);
 
-private:
-    void rebuild();
+ private:
+  void rebuild();
 
-    QChartView*  m_view       = nullptr;
-    QChart*      m_chart      = nullptr;
-    QPieSeries*  m_series     = nullptr;
-    QLabel*      m_centerVal  = nullptr;
-    QLabel*      m_centerLab  = nullptr;
-    QVector<Slice> m_slices;
+  QChartView* m_view = nullptr;
+  QChart* m_chart = nullptr;
+  QPieSeries* m_series = nullptr;
+  QLabel* m_centerVal = nullptr;
+  QLabel* m_centerLab = nullptr;
+  QVector<Slice> m_slices;
 };

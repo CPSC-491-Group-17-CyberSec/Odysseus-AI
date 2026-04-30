@@ -23,9 +23,9 @@
 //   └─────────────────────────────────────────────┘
 // ============================================================================
 
-#include "../../../include/monitor/ProcessInfo.h"
-
 #include <QFrame>
+
+#include "../../../include/monitor/ProcessInfo.h"
 
 class QLabel;
 class QListWidget;
@@ -33,68 +33,67 @@ class QListWidgetItem;
 class QPushButton;
 class QProgressBar;
 
-class SystemStatusPanel : public QFrame
-{
-    Q_OBJECT
-public:
-    explicit SystemStatusPanel(QWidget* parent = nullptr);
+class SystemStatusPanel : public QFrame {
+  Q_OBJECT
+ public:
+  explicit SystemStatusPanel(QWidget* parent = nullptr);
 
-    /// Replace the rendered snapshot. Cheap; called from MainWindow whenever
-    /// SystemMonitor emits snapshotReady.
-    void setSnapshot(const SystemSnapshot& snap);
+  /// Replace the rendered snapshot. Cheap; called from MainWindow whenever
+  /// SystemMonitor emits snapshotReady.
+  void setSnapshot(const SystemSnapshot& snap);
 
-    /// Show/hide the per-section "loading" state. Called when the user
-    /// clicks Refresh and the monitor is doing its work.
-    void setRefreshing(bool refreshing);
+  /// Show/hide the per-section "loading" state. Called when the user
+  /// clicks Refresh and the monitor is doing its work.
+  void setRefreshing(bool refreshing);
 
-signals:
-    /// Emitted when the user clicks the Refresh button.
-    void refreshRequested();
+ signals:
+  /// Emitted when the user clicks the Refresh button.
+  void refreshRequested();
 
-    /// Emitted when the user clicks Close.
-    void closeRequested();
+  /// Emitted when the user clicks Close.
+  void closeRequested();
 
-private slots:
-    void onProcessRowClicked(QListWidgetItem* item);
-    void onPersistenceRowClicked(QListWidgetItem* item);
-    // Phase 3
-    void onCrossViewRowClicked(QListWidgetItem* item);
-    void onExtensionRowClicked(QListWidgetItem* item);
-    void onIntegrityRowClicked(QListWidgetItem* item);
+ private slots:
+  void onProcessRowClicked(QListWidgetItem* item);
+  void onPersistenceRowClicked(QListWidgetItem* item);
+  // Phase 3
+  void onCrossViewRowClicked(QListWidgetItem* item);
+  void onExtensionRowClicked(QListWidgetItem* item);
+  void onIntegrityRowClicked(QListWidgetItem* item);
 
-private:
-    void buildUi();
+ private:
+  void buildUi();
 
-    // Header
-    QPushButton*  m_refreshBtn  = nullptr;
-    QPushButton*  m_closeBtn    = nullptr;
-    QLabel*       m_subTitle    = nullptr;
+  // Header
+  QPushButton* m_refreshBtn = nullptr;
+  QPushButton* m_closeBtn = nullptr;
+  QLabel* m_subTitle = nullptr;
 
-    // KPI strip
-    QLabel*       m_kpiSuspicious    = nullptr;
-    QLabel*       m_kpiPersistence   = nullptr;
-    QLabel*       m_kpiTotalProcs    = nullptr;
-    QLabel*       m_kpiPlatform      = nullptr;
+  // KPI strip
+  QLabel* m_kpiSuspicious = nullptr;
+  QLabel* m_kpiPersistence = nullptr;
+  QLabel* m_kpiTotalProcs = nullptr;
+  QLabel* m_kpiPlatform = nullptr;
 
-    // Sections
-    QLabel*       m_suspiciousHeader = nullptr;
-    QListWidget*  m_suspiciousList   = nullptr;
-    QLabel*       m_persistenceHeader = nullptr;
-    QListWidget*  m_persistenceList  = nullptr;
+  // Sections
+  QLabel* m_suspiciousHeader = nullptr;
+  QListWidget* m_suspiciousList = nullptr;
+  QLabel* m_persistenceHeader = nullptr;
+  QListWidget* m_persistenceList = nullptr;
 
-    // Phase 3 — rootkit awareness sections
-    QLabel*       m_kpiKernelExt        = nullptr;   // KPI tile
-    QLabel*       m_kpiIntegrity        = nullptr;   // KPI tile
-    QLabel*       m_crossViewHeader     = nullptr;
-    QListWidget*  m_crossViewList       = nullptr;
-    QLabel*       m_extensionsHeader    = nullptr;
-    QListWidget*  m_extensionsList      = nullptr;
-    QLabel*       m_integrityHeader     = nullptr;
-    QListWidget*  m_integrityList       = nullptr;
+  // Phase 3 — rootkit awareness sections
+  QLabel* m_kpiKernelExt = nullptr;  // KPI tile
+  QLabel* m_kpiIntegrity = nullptr;  // KPI tile
+  QLabel* m_crossViewHeader = nullptr;
+  QListWidget* m_crossViewList = nullptr;
+  QLabel* m_extensionsHeader = nullptr;
+  QListWidget* m_extensionsList = nullptr;
+  QLabel* m_integrityHeader = nullptr;
+  QListWidget* m_integrityList = nullptr;
 
-    // Detail box (shown when a row is clicked)
-    QLabel*       m_detailLabel      = nullptr;
+  // Detail box (shown when a row is clicked)
+  QLabel* m_detailLabel = nullptr;
 
-    // State
-    SystemSnapshot m_snapshot;
+  // State
+  SystemSnapshot m_snapshot;
 };

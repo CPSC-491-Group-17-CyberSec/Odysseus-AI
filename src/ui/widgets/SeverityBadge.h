@@ -15,27 +15,24 @@
 //                used in row lists, less visually heavy)
 // ============================================================================
 
-#include "../../../include/edr/AlertTypes.h"
-
 #include <QLabel>
 
-class SeverityBadge : public QLabel
-{
-    Q_OBJECT
-public:
-    enum Style { Outlined, Filled };
+#include "../../../include/edr/AlertTypes.h"
 
-    explicit SeverityBadge(QWidget* parent = nullptr);
-    explicit SeverityBadge(EDR::Severity sev,
-                            Style          style  = Outlined,
-                            QWidget*       parent = nullptr);
+class SeverityBadge : public QLabel {
+  Q_OBJECT
+ public:
+  enum Style { Outlined, Filled };
 
-    void setSeverity(EDR::Severity sev);
-    void setBadgeStyle(Style style);
+  explicit SeverityBadge(QWidget* parent = nullptr);
+  explicit SeverityBadge(EDR::Severity sev, Style style = Outlined, QWidget* parent = nullptr);
 
-private:
-    void rerender();
+  void setSeverity(EDR::Severity sev);
+  void setBadgeStyle(Style style);
 
-    EDR::Severity m_severity = EDR::Severity::Info;
-    Style         m_style    = Outlined;
+ private:
+  void rerender();
+
+  EDR::Severity m_severity = EDR::Severity::Info;
+  Style m_style = Outlined;
 };

@@ -20,27 +20,26 @@
 
 class QLabel;
 
-class StatCard : public QFrame
-{
-    Q_OBJECT
-public:
-    enum Tone { Safe, Critical, Warning, Info };
+class StatCard : public QFrame {
+  Q_OBJECT
+ public:
+  enum Tone { Safe, Critical, Warning, Info };
 
-    explicit StatCard(QWidget* parent = nullptr);
+  explicit StatCard(QWidget* parent = nullptr);
 
-    void setTone(Tone tone);
-    void setTitle(const QString& title);
-    void setValue(const QString& value);
-    void setSubtitle(const QString& subtitle);
-    void setIcon(const QString& glyph);
+  void setTone(Tone tone);
+  void setTitle(const QString& title);
+  void setValue(const QString& value);
+  void setSubtitle(const QString& subtitle);
+  void setIcon(const QString& glyph);
 
-private:
-    void applyTone();
+ private:
+  void applyTone();
 
-    QLabel* m_titleLabel    = nullptr;
-    QLabel* m_valueLabel    = nullptr;
-    QLabel* m_subtitleLabel = nullptr;
-    QLabel* m_iconLabel     = nullptr;
-    QFrame* m_pulseBar      = nullptr;
-    Tone    m_tone          = Info;
+  QLabel* m_titleLabel = nullptr;
+  QLabel* m_valueLabel = nullptr;
+  QLabel* m_subtitleLabel = nullptr;
+  QLabel* m_iconLabel = nullptr;
+  QFrame* m_pulseBar = nullptr;
+  Tone m_tone = Info;
 };

@@ -13,25 +13,24 @@
 
 class QLabel;
 
-class DropArea : public QFrame
-{
-    Q_OBJECT
-public:
-    explicit DropArea(QWidget* parent = nullptr);
+class DropArea : public QFrame {
+  Q_OBJECT
+ public:
+  explicit DropArea(QWidget* parent = nullptr);
 
-signals:
-    void filesDropped(const QStringList& paths);
+ signals:
+  void filesDropped(const QStringList& paths);
 
-protected:
-    void dragEnterEvent(QDragEnterEvent* e) override;
-    void dragLeaveEvent(QDragLeaveEvent* e) override;
-    void dropEvent(QDropEvent* e) override;
+ protected:
+  void dragEnterEvent(QDragEnterEvent* e) override;
+  void dragLeaveEvent(QDragLeaveEvent* e) override;
+  void dropEvent(QDropEvent* e) override;
 
-private:
-    void applyStyle();
+ private:
+  void applyStyle();
 
-    QLabel* m_iconLabel  = nullptr;
-    QLabel* m_titleLabel = nullptr;
-    QLabel* m_subLabel   = nullptr;
-    bool    m_hovered    = false;
+  QLabel* m_iconLabel = nullptr;
+  QLabel* m_titleLabel = nullptr;
+  QLabel* m_subLabel = nullptr;
+  bool m_hovered = false;
 };

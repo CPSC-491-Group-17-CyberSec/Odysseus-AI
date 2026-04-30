@@ -15,29 +15,27 @@
 class QLabel;
 class QVBoxLayout;
 
-class DetailSection : public QFrame
-{
-    Q_OBJECT
-public:
-    /// `accentHex` controls the left-border color (severity / accent blue).
-    /// Defaults to accent blue; pass severity color when relevant.
-    explicit DetailSection(const QString& title,
-                            const QString& accentHex = QString(),
-                            QWidget*       parent = nullptr);
+class DetailSection : public QFrame {
+  Q_OBJECT
+ public:
+  /// `accentHex` controls the left-border color (severity / accent blue).
+  /// Defaults to accent blue; pass severity color when relevant.
+  explicit DetailSection(
+      const QString& title, const QString& accentHex = QString(), QWidget* parent = nullptr);
 
-    /// Replace body content with a single paragraph. Call clear() first
-    /// or use setBullets() to switch modes.
-    void setBody(const QString& bodyText);
+  /// Replace body content with a single paragraph. Call clear() first
+  /// or use setBullets() to switch modes.
+  void setBody(const QString& bodyText);
 
-    /// Replace body content with a bullet list. Each item is rendered on
-    /// its own line with a leading "• ".
-    void setBullets(const QStringList& bullets);
+  /// Replace body content with a bullet list. Each item is rendered on
+  /// its own line with a leading "• ".
+  void setBullets(const QStringList& bullets);
 
-    /// Drop all current body widgets.
-    void clear();
+  /// Drop all current body widgets.
+  void clear();
 
-private:
-    QString      m_accentHex;
-    QLabel*      m_titleLabel = nullptr;
-    QVBoxLayout* m_body       = nullptr;
+ private:
+  QString m_accentHex;
+  QLabel* m_titleLabel = nullptr;
+  QVBoxLayout* m_body = nullptr;
 };

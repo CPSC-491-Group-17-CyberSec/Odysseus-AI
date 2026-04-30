@@ -21,29 +21,28 @@ class QListWidgetItem;
 class QLabel;
 class QPushButton;
 
-class QuarantinePage : public QWidget
-{
-    Q_OBJECT
-public:
-    explicit QuarantinePage(QWidget* parent = nullptr);
+class QuarantinePage : public QWidget {
+  Q_OBJECT
+ public:
+  explicit QuarantinePage(QWidget* parent = nullptr);
 
-    /// Reload the list from Quarantine::list(). Cheap; the metadata is
-    /// already in memory inside the Quarantine instance.
-    void refresh();
+  /// Reload the list from Quarantine::list(). Cheap; the metadata is
+  /// already in memory inside the Quarantine instance.
+  void refresh();
 
-private slots:
-    void onSelectionChanged();
-    void onRestoreClicked();
-    void onRefreshClicked();
+ private slots:
+  void onSelectionChanged();
+  void onRestoreClicked();
+  void onRefreshClicked();
 
-private:
-    void buildUi();
-    void setStatus(const QString& msg, bool isError);
+ private:
+  void buildUi();
+  void setStatus(const QString& msg, bool isError);
 
-    QListWidget*  m_list      = nullptr;
-    QLabel*       m_detail    = nullptr;
-    QLabel*       m_status    = nullptr;
-    QPushButton*  m_restoreBtn = nullptr;
-    QPushButton*  m_refreshBtn = nullptr;
-    QLabel*       m_emptyHint = nullptr;
+  QListWidget* m_list = nullptr;
+  QLabel* m_detail = nullptr;
+  QLabel* m_status = nullptr;
+  QPushButton* m_restoreBtn = nullptr;
+  QPushButton* m_refreshBtn = nullptr;
+  QLabel* m_emptyHint = nullptr;
 };

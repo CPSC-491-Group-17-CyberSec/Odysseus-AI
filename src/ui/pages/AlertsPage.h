@@ -16,11 +16,11 @@
 // MainWindow when MonitoringService::tickCompleted fires.
 // ============================================================================
 
-#include "../../../include/edr/AlertTypes.h"
-
-#include <QWidget>
-#include <QVector>
 #include <QDateTime>
+#include <QVector>
+#include <QWidget>
+
+#include "../../../include/edr/AlertTypes.h"
 
 class QLabel;
 class QFrame;
@@ -33,99 +33,98 @@ class FilterBar;
 class AlertRow;
 class AlertDetailPanel;
 
-class AlertsPage : public QWidget
-{
-    Q_OBJECT
-public:
-    explicit AlertsPage(QWidget* parent = nullptr);
+class AlertsPage : public QWidget {
+  Q_OBJECT
+ public:
+  explicit AlertsPage(QWidget* parent = nullptr);
 
-    /// Replace the list with a full snapshot (used on first show).
-    void setAlerts(const QVector<EDR::Alert>& alerts);
+  /// Replace the list with a full snapshot (used on first show).
+  void setAlerts(const QVector<EDR::Alert>& alerts);
 
-    /// Append a single new alert (called from MainWindow when the
-    /// MonitoringService emits alertRaised). Most-recent rendered first.
-    void appendAlert(const EDR::Alert& alert);
+  /// Append a single new alert (called from MainWindow when the
+  /// MonitoringService emits alertRaised). Most-recent rendered first.
+  void appendAlert(const EDR::Alert& alert);
 
-    /// Mark an existing alert resolved (MonitoringService::alertResolved).
-    /// Matches by alert.id; triggers a row + detail re-render.
-    void markAlertResolved(const EDR::Alert& alert);
+  /// Mark an existing alert resolved (MonitoringService::alertResolved).
+  /// Matches by alert.id; triggers a row + detail re-render.
+  void markAlertResolved(const EDR::Alert& alert);
 
-    /// Refresh an existing alert in place (MonitoringService::alertUpdated).
-    /// Bumps lastSeen / ticksSeen / occurrenceCount on the matching id.
-    void updateAlert(const EDR::Alert& alert);
+  /// Refresh an existing alert in place (MonitoringService::alertUpdated).
+  /// Bumps lastSeen / ticksSeen / occurrenceCount on the matching id.
+  void updateAlert(const EDR::Alert& alert);
 
-    /// Wipe everything — used when EDR is disabled.
-    void clear();
+  /// Wipe everything — used when EDR is disabled.
+  void clear();
 
-    /// Called from MainWindow when MonitoringService::tickCompleted fires.
-    /// Updates the timeline strip ("last check N sec ago • K new alerts").
-    void setLastTick(const QDateTime& when, int alertsThisTick);
+  /// Called from MainWindow when MonitoringService::tickCompleted fires.
+  /// Updates the timeline strip ("last check N sec ago • K new alerts").
+  void setLastTick(const QDateTime& when, int alertsThisTick);
 
-    /// Toggle the "running but no first tick yet" loading hint.
-    void setEdrRunning(bool running);
+  /// Toggle the "running but no first tick yet" loading hint.
+  void setEdrRunning(bool running);
 
-private slots:
-    void onRowClicked(int displayIndex);
-    void onFiltersChanged();
-    void onTimelineRefresh();
-    void onOpenLocationRequested(const QString& path);
+ private slots:
+  void onRowClicked(int displayIndex);
+  void onFiltersChanged();
+  void onTimelineRefresh();
+  void onOpenLocationRequested(const QString& path);
 
-private:
-    // ── Internal type ──────────────────────────────────────────────────
-    struct Group {
-        EDR::Alert representative;       // shown in the row (most recent)
-        int        occurrences = 1;
-        QVector<int> sourceIndices;      // indices into m_alerts (for detail)
-    };
+ private:
+  // ── Internal type ──────────────────────────────────────────────────
+  struct Group {
+    EDR::Alert representative;   // shown in the row (most recent)
+    int occurrences = 1;
+    QVector<int> sourceIndices;  // indices into m_alerts (for detail)
+  };
 
-    void buildUi();
-    void rebuildList();          // re-runs grouping + filtering, re-renders rows
-    void refreshKpis();
-    void refreshTimelineLabel();
-    bool passesFilters(const EDR::Alert& a) const;
-    QVector<Group> groupAndFilter() const;
+  void buildUi();
+  void rebuildList();  // re-runs grouping + filtering, re-renders rows
+  void refreshKpis();
+  void refreshTimelineLabel();
+  bool passesFilters(const EDR::Alert& a) const;
+  QVector<Group> groupAndFilter() const;
 
-    // ── Header ─────────────────────────────────────────────────────────
-    QLabel*     m_title    = nullptr;
-    QLabel*     m_subtitle = nullptr;
+  // ── Header ─────────────────────────────────────────────────────────
+  QLabel* m_title = nullptr;
+  QLabel* m_subtitle = nullptr;
 
-    // ── Timeline strip ─────────────────────────────────────────────────
-    QFrame*     m_timeline      = nullptr;
-    QLabel*     m_timelineDot   = nullptr;
-    QLabel*     m_timelineText  = nullptr;
-    QTimer*     m_timelineTick  = nullptr;
-    QDateTime   m_lastTickAt;
-    int         m_lastTickNewAlerts = 0;
-    bool        m_edrRunning   = false;
-    bool        m_haveFirstTick = false;
+  // ── Timeline strip ─────────────────────────────────────────────────
+  QFrame* m_timeline = nullptr;
+  QLabel* m_timelineDot = nullptr;
+  QLabel* m_timelineText = nullptr;
+  QTimer* m_timelineTick = nullptr;
+  QDateTime m_lastTickAt;
+  int m_lastTickNewAlerts = 0;
+  bool m_edrRunning = false;
+  bool m_haveFirstTick = false;
 
-    // ── KPI strip ──────────────────────────────────────────────────────
-    StatCard*   m_kpiTotal    = nullptr;
-    StatCard*   m_kpiCritical = nullptr;
-    StatCard*   m_kpiHigh     = nullptr;
-    StatCard*   m_kpiRecent   = nullptr;
+  // ── KPI strip ──────────────────────────────────────────────────────
+  StatCard* m_kpiTotal = nullptr;
+  StatCard* m_kpiCritical = nullptr;
+  StatCard* m_kpiHigh = nullptr;
+  StatCard* m_kpiRecent = nullptr;
 
-    // ── Filter bar ─────────────────────────────────────────────────────
-    FilterBar*  m_filterBar   = nullptr;
+  // ── Filter bar ─────────────────────────────────────────────────────
+  FilterBar* m_filterBar = nullptr;
 
-    // ── List + detail ──────────────────────────────────────────────────
-    QScrollArea* m_listScroll = nullptr;
-    QWidget*     m_listHost   = nullptr;
-    QVBoxLayout* m_listLayout = nullptr;
-    QLabel*      m_emptyState = nullptr;
-    QLabel*      m_loadingState = nullptr;
+  // ── List + detail ──────────────────────────────────────────────────
+  QScrollArea* m_listScroll = nullptr;
+  QWidget* m_listHost = nullptr;
+  QVBoxLayout* m_listLayout = nullptr;
+  QLabel* m_emptyState = nullptr;
+  QLabel* m_loadingState = nullptr;
 
-    AlertDetailPanel* m_detail = nullptr;
+  AlertDetailPanel* m_detail = nullptr;
 
-    // Cached row widgets — rebuilt on every rebuildList() call. We
-    // intentionally don't try to virtualize until row count > 200; for
-    // typical EDR runs this is well below that threshold and a simple
-    // recreate-all is fast enough.
-    QVector<AlertRow*> m_rows;
-    QVector<Group>     m_currentGroups;   // mirrors row order; index = display
-    int                m_selectedRow = -1;
-    QString            m_selectedAlertId;     // survives re-grouping
+  // Cached row widgets — rebuilt on every rebuildList() call. We
+  // intentionally don't try to virtualize until row count > 200; for
+  // typical EDR runs this is well below that threshold and a simple
+  // recreate-all is fast enough.
+  QVector<AlertRow*> m_rows;
+  QVector<Group> m_currentGroups;  // mirrors row order; index = display
+  int m_selectedRow = -1;
+  QString m_selectedAlertId;       // survives re-grouping
 
-    // Underlying data
-    QVector<EDR::Alert> m_alerts;
+  // Underlying data
+  QVector<EDR::Alert> m_alerts;
 };

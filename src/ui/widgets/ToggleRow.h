@@ -12,56 +12,52 @@
 // with the rest of the codebase).
 // ============================================================================
 
-#include <QWidget>
 #include <QFrame>
 #include <QString>
+#include <QWidget>
 
 class QLabel;
 
 // ---------------------------------------------------------------------------
 // ToggleSwitch  –  painted pill (40×22) with a sliding knob.
 // ---------------------------------------------------------------------------
-class ToggleSwitch : public QWidget
-{
-    Q_OBJECT
-public:
-    explicit ToggleSwitch(QWidget* parent = nullptr);
+class ToggleSwitch : public QWidget {
+  Q_OBJECT
+ public:
+  explicit ToggleSwitch(QWidget* parent = nullptr);
 
-    bool isChecked() const { return m_checked; }
-    /// Programmatic state change. Emits `toggled` if the value changed.
-    void setChecked(bool checked);
+  bool isChecked() const { return m_checked; }
+  /// Programmatic state change. Emits `toggled` if the value changed.
+  void setChecked(bool checked);
 
-signals:
-    void toggled(bool checked);
+ signals:
+  void toggled(bool checked);
 
-protected:
-    void paintEvent(QPaintEvent*) override;
-    void mouseReleaseEvent(QMouseEvent*) override;
-    QSize sizeHint() const override;
+ protected:
+  void paintEvent(QPaintEvent*) override;
+  void mouseReleaseEvent(QMouseEvent*) override;
+  QSize sizeHint() const override;
 
-private:
-    bool m_checked = false;
+ private:
+  bool m_checked = false;
 };
 
 // ---------------------------------------------------------------------------
 // ToggleRow  –  one labeled toggle row used by SettingsPage.
 // ---------------------------------------------------------------------------
-class ToggleRow : public QFrame
-{
-    Q_OBJECT
-public:
-    ToggleRow(const QString& label,
-               const QString& description,
-               QWidget*       parent = nullptr);
+class ToggleRow : public QFrame {
+  Q_OBJECT
+ public:
+  ToggleRow(const QString& label, const QString& description, QWidget* parent = nullptr);
 
-    bool isChecked() const;
-    void setChecked(bool checked);
+  bool isChecked() const;
+  void setChecked(bool checked);
 
-signals:
-    void toggled(bool checked);
+ signals:
+  void toggled(bool checked);
 
-private:
-    QLabel*       m_label       = nullptr;
-    QLabel*       m_description = nullptr;
-    ToggleSwitch* m_switch      = nullptr;
+ private:
+  QLabel* m_label = nullptr;
+  QLabel* m_description = nullptr;
+  ToggleSwitch* m_switch = nullptr;
 };

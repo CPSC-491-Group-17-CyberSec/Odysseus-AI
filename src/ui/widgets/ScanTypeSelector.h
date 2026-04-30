@@ -22,44 +22,46 @@
 class QPushButton;
 class QLabel;
 
-class ScanTypeSelector : public QFrame
-{
-    Q_OBJECT
-public:
-    enum ScanType { Quick = 0, Full = 1, Custom = 2 };
+class ScanTypeSelector : public QFrame {
+  Q_OBJECT
+ public:
+  enum ScanType { Quick = 0, Full = 1, Custom = 2 };
 
-    explicit ScanTypeSelector(QWidget* parent = nullptr);
+  explicit ScanTypeSelector(QWidget* parent = nullptr);
 
-    void setSelected(ScanType type);
-    ScanType selected() const { return m_selected; }
+  void setSelected(ScanType type);
+  ScanType selected() const { return m_selected; }
 
-protected:
-    /// Hooked up to each card-frame so a click selects that scan type
-    /// without needing a custom QFrame subclass with a clicked() signal.
-    bool eventFilter(QObject* watched, QEvent* event) override;
+ protected:
+  /// Hooked up to each card-frame so a click selects that scan type
+  /// without needing a custom QFrame subclass with a clicked() signal.
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
-signals:
-    void scanRequested(int scanType);
+ signals:
+  void scanRequested(int scanType);
 
-private slots:
-    void onCardClicked();
-    void onStartClicked();
+ private slots:
+  void onCardClicked();
+  void onStartClicked();
 
-private:
-    struct Card {
-        QFrame*  frame    = nullptr;
-        QLabel*  glyph    = nullptr;
-        QLabel*  title    = nullptr;
-        QLabel*  subtitle = nullptr;
-        QLabel*  estimate = nullptr;
-        ScanType type     = Quick;
-    };
-    void styleCard(Card& c, bool selected);
-    Card buildCard(ScanType type, const QString& glyph,
-                    const QString& title, const QString& subtitle,
-                    const QString& estimate);
+ private:
+  struct Card {
+    QFrame* frame = nullptr;
+    QLabel* glyph = nullptr;
+    QLabel* title = nullptr;
+    QLabel* subtitle = nullptr;
+    QLabel* estimate = nullptr;
+    ScanType type = Quick;
+  };
+  void styleCard(Card& c, bool selected);
+  Card buildCard(
+      ScanType type,
+      const QString& glyph,
+      const QString& title,
+      const QString& subtitle,
+      const QString& estimate);
 
-    Card        m_cards[3];
-    QPushButton* m_startBtn = nullptr;
-    ScanType    m_selected = Quick;
+  Card m_cards[3];
+  QPushButton* m_startBtn = nullptr;
+  ScanType m_selected = Quick;
 };

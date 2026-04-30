@@ -11,41 +11,40 @@
 // keeps the moc surface small and the UI inspector-friendly.
 // ============================================================================
 
-#include <QWidget>
 #include <QString>
 #include <QVector>
+#include <QWidget>
 
 class QPushButton;
 class QButtonGroup;
 class QVBoxLayout;
 class QLabel;
 
-class Sidebar : public QWidget
-{
-    Q_OBJECT
-public:
-    explicit Sidebar(QWidget* parent = nullptr);
+class Sidebar : public QWidget {
+  Q_OBJECT
+ public:
+  explicit Sidebar(QWidget* parent = nullptr);
 
-    /// Add a navigation item. Index returned matches the order of additions.
-    /// `glyph` is a short text/unicode glyph rendered before the label.
-    int addItem(const QString& label, const QString& glyph);
+  /// Add a navigation item. Index returned matches the order of additions.
+  /// `glyph` is a short text/unicode glyph rendered before the label.
+  int addItem(const QString& label, const QString& glyph);
 
-    /// Programmatically select an item (no signal emitted).
-    void setActive(int index);
+  /// Programmatically select an item (no signal emitted).
+  void setActive(int index);
 
-    /// Set the small footer text below the nav (e.g. version).
-    void setFooterText(const QString& text);
+  /// Set the small footer text below the nav (e.g. version).
+  void setFooterText(const QString& text);
 
-signals:
-    /// Emitted when the user clicks an item.
-    void pageRequested(int index);
+ signals:
+  /// Emitted when the user clicks an item.
+  void pageRequested(int index);
 
-private slots:
-    void onButtonClicked();
+ private slots:
+  void onButtonClicked();
 
-private:
-    QVBoxLayout*       m_buttonsLayout = nullptr;
-    QButtonGroup*      m_group         = nullptr;
-    QVector<QPushButton*> m_buttons;
-    QLabel*            m_footer        = nullptr;
+ private:
+  QVBoxLayout* m_buttonsLayout = nullptr;
+  QButtonGroup* m_group = nullptr;
+  QVector<QPushButton*> m_buttons;
+  QLabel* m_footer = nullptr;
 };

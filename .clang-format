@@ -54,9 +54,6 @@ AlignTrailingComments:
   Kind: Always
   OverEmptyLines: 1
 
-# Penalty tuning (controls where clang-format prefers to break)
-PenaltyBreakBeforeBinaryOperator: 10
-PenaltyReturnTypeOnItsOwnLine: 200      # strongly prefer keeping return type with function name
 
 # C++ standard
 Standard: c++17                         # or c++20
