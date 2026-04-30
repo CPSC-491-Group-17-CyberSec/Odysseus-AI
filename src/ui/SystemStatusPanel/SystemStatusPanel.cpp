@@ -40,6 +40,24 @@ QString severityBg(const QString& sev) {
   if (s == "low")
     return "#E8F5E9";
   return "#F0F0F0";
+QString severityColor(const QString& sev)
+{
+    const QString s = sev.toLower();
+    if (s == "high"     || s == "critical") return "#C62828";
+    if (s == "medium")                       return "#E65100";
+    if (s == "low")                          return "#2E7D32";
+    if (s == "info"     || s == "informational") return "#1976D2"; // blue
+    return "#888888";
+}
+
+QString severityBg(const QString& sev)
+{
+    const QString s = sev.toLower();
+    if (s == "high"     || s == "critical") return "#FDECEA";
+    if (s == "medium")                       return "#FFF3E0";
+    if (s == "low")                          return "#E8F5E9";
+    if (s == "info"     || s == "informational") return "#E3F2FD"; // light blue
+    return "#F0F0F0";
 }
 
 }  // namespace

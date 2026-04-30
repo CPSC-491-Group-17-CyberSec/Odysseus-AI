@@ -71,6 +71,21 @@ EDR::Severity processSeverity(const QString& raw) {
   if (s == "medium")
     return EDR::Severity::Medium;
   if (s == "low")
+EDR::Severity processSeverity(const QString& raw)
+{
+    const QString s = raw.toLower();
+    if (s == "high")     return EDR::Severity::High;
+    if (s == "medium")   return EDR::Severity::Medium;
+    if (s == "low")      return EDR::Severity::Low;
+    if (s == "info")     return EDR::Severity::Info;   // Phase 5 — dev-tool path-only
+    return EDR::Severity::Medium;     // default for suspicious processes
+}
+
+EDR::Severity persistenceSeverity(const QString& raw)
+{
+    const QString s = raw.toLower();
+    if (s == "high")    return EDR::Severity::High;
+    if (s == "medium")  return EDR::Severity::Medium;
     return EDR::Severity::Low;
   return EDR::Severity::Medium;  // default for suspicious processes
 }
@@ -141,6 +156,30 @@ void diffSuspiciousProcesses(
     a.recommendedAction =
         "Review the process and its origin. Terminate if unfamiliar; "
         "investigate parent process and command line.";
+        EDR::Alert a;
+        a.id        = newId();
+        a.dedupKey  = key;
+        a.timestamp = QDateTime::currentDateTime();
+        a.firstSeen = a.timestamp;
+        a.lastSeen  = a.timestamp;
+        a.severity  = processSeverity(sp.severity);
+        a.category  = EDR::Category::Process;
+        // Title is severity-aware: Info/Low (e.g. dev-tool path-only) reads
+        // as "Process needs review" instead of the alarming "Suspicious
+        // process". This is the user-visible part of the cpptools-srv /
+        // VS Code false-positive fix.
+        a.title = (a.severity == EDR::Severity::Info
+                   || a.severity == EDR::Severity::Low)
+                      ? QString("Process needs review: %1").arg(sp.info.name)
+                      : QString("Suspicious process: %1").arg(sp.info.name);
+        a.description = sp.reasons.isEmpty()
+            ? QStringLiteral("A process needs review.")
+            : sp.reasons.first();
+        a.sourcePath  = sp.info.exePath.isEmpty()
+                          ? sp.info.name : sp.info.exePath;
+        a.recommendedAction =
+            "Review the process and its origin. Terminate if unfamiliar; "
+            "investigate parent process and command line.";
 
     // Structured fields (Polish.A)
     a.pid = sp.info.pid;
