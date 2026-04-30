@@ -1,3 +1,62 @@
 BasedOnStyle: Google
-IndentWidth: 4
-ColumnLimit: 100
+
+# Indentation
+IndentWidth: 2                          # Google uses 2 (change to 4 if you prefer)
+ContinuationIndentWidth: 4
+AccessModifierOffset: -1                # public/private indented 1 less than class body
+
+# Line length
+ColumnLimit: 100                        # Google default is 80, 100 is more practical
+
+# Braces
+BreakBeforeBraces: Attach               # K&R style: if (...) {
+IndentCaseLabels: true                  # indent case inside switch
+
+# Includes
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup                  # groups: related, other project, system
+                                        # (works well with .clang-format include categories)
+
+# Pointers & references
+PointerAlignment: Left                  # int* ptr (Google style)
+ReferenceAlignment: Left                # int& ref
+
+# Spacing
+SpaceBeforeParens: ControlStatements    # if (...) but not foo(...)
+SpaceInEmptyBlock: false
+SpacesInAngles: Never                   # vector<int> not vector< int >
+
+# Function arguments / parameters
+BinPackArguments: false                 # if args don't fit on one line, each gets its own
+BinPackParameters: false
+AlignAfterOpenBracket: AlwaysBreak      # consistent multi-line calls
+
+# Constructor initializers
+BreakConstructorInitializers: BeforeColon
+PackConstructorInitializers: Never      # each initializer on its own line
+
+# Trailing commas
+InsertTrailingCommas: Wrapped           # adds trailing comma on wrapped arg lists (clang-format 12+)
+
+# Lambdas
+LambdaBodyIndentation: OuterScope
+
+# Short forms (set to Empty/false to keep things readable)
+AllowShortFunctionsOnASingleLine: Inline   # only allow short inline methods on one line
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty       # only empty blocks: {}
+
+# Alignment (personal preference — turn off if it causes noisy diffs)
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+
+# Penalty tuning (controls where clang-format prefers to break)
+PenaltyBreakBeforeBinaryOperator: 10
+PenaltyReturnTypeOnItsOwnLine: 200      # strongly prefer keeping return type with function name
+
+# C++ standard
+Standard: c++17                         # or c++20
