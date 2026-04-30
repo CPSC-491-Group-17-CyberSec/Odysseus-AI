@@ -28,11 +28,86 @@
 #include <QUrl>
 #include <QFileInfo>
 #include <QThread>
+#include <QThreadPool>          // Phase 5 stability — async dispatch
+#include <QRunnable>
 
 #include <sstream>
 #include <iomanip>
 #include <iostream>
-#include <thread>
+
+// ============================================================================
+// Internal helpers (anonymous namespace — no LLMExplainer-`this` dependency).
+//
+// Why these are free functions instead of member functions:
+//   The async path used to do `std::thread([this, ...]{ queryOllama(...); }).detach()`
+//   which is a use-after-free if the LLMExplainer is destroyed while the
+//   detached thread is still in flight. Moving the actual HTTP work into a
+//   stateless function lets the async lambda capture only value-typed copies
+//   (Config, prompt, callback) — the in-flight request never touches the
+//   originating LLMExplainer instance, so its lifetime is irrelevant.
+// ============================================================================
+namespace {
+
+std::string queryOllamaImpl(const LLMExplainer::Config& cfg,
+                             const std::string& prompt)
+{
+    QNetworkAccessManager mgr;
+    QNetworkRequest req(QUrl(QString::fromStdString(cfg.ollamaUrl)));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+    QJsonObject payload;
+    payload["model"]  = QString::fromStdString(cfg.model);
+    payload["prompt"]  = QString::fromStdString(prompt);
+    payload["stream"] = false;
+
+    QJsonObject options;
+    options["temperature"]    = 0.2;
+    options["num_predict"]    = 256;
+    options["top_p"]          = 0.9;
+    options["repeat_penalty"] = 1.2;
+    payload["options"] = options;
+
+    QNetworkReply* reply = mgr.post(req, QJsonDocument(payload).toJson());
+
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timer.start(cfg.timeoutSecs * 1000);
+    loop.exec();
+
+    if (!reply->isFinished()) {
+        reply->abort();
+        reply->deleteLater();
+        return "[LLM Explainer] Timeout: Ollama did not respond within "
+               + std::to_string(cfg.timeoutSecs) + " seconds.";
+    }
+
+    if (reply->error() != QNetworkReply::NoError) {
+        std::string err = "[LLM Explainer] Ollama error: "
+                          + reply->errorString().toStdString();
+        reply->deleteLater();
+        return err;
+    }
+
+    QByteArray data = reply->readAll();
+    reply->deleteLater();
+
+    QJsonDocument doc = QJsonDocument::fromJson(data);
+    if (doc.isNull() || !doc.isObject()) {
+        return "[LLM Explainer] Failed to parse Ollama response.";
+    }
+
+    QJsonObject obj = doc.object();
+    if (obj.contains("response")) {
+        return obj["response"].toString().toStdString();
+    }
+
+    return "[LLM Explainer] Unexpected Ollama response format.";
+}
+
+}  // anonymous namespace
 
 // ============================================================================
 // Construction
@@ -194,64 +269,12 @@ std::string LLMExplainer::buildPrompt(const std::string& filePath,
 }
 
 // ============================================================================
-// queryOllama  –  blocking HTTP POST to the local Ollama API
+// queryOllama  –  delegates to the free queryOllamaImpl with the current
+// configuration. Behavior identical to the previous in-line implementation.
 // ============================================================================
 std::string LLMExplainer::queryOllama(const std::string& prompt) const
 {
-    QNetworkAccessManager mgr;
-    QNetworkRequest req(QUrl(QString::fromStdString(m_config.ollamaUrl)));
-    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-    QJsonObject payload;
-    payload["model"]  = QString::fromStdString(m_config.model);
-    payload["prompt"]  = QString::fromStdString(prompt);
-    payload["stream"] = false;
-
-    QJsonObject options;
-    options["temperature"] = 0.2;
-    options["num_predict"] = 256;
-    options["top_p"]       = 0.9;
-    options["repeat_penalty"] = 1.2;
-    payload["options"] = options;
-
-    QNetworkReply* reply = mgr.post(req, QJsonDocument(payload).toJson());
-
-    QEventLoop loop;
-    QTimer timer;
-    timer.setSingleShot(true);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    timer.start(m_config.timeoutSecs * 1000);
-    loop.exec();
-
-    if (!reply->isFinished()) {
-        reply->abort();
-        reply->deleteLater();
-        return "[LLM Explainer] Timeout: Ollama did not respond within "
-               + std::to_string(m_config.timeoutSecs) + " seconds.";
-    }
-
-    if (reply->error() != QNetworkReply::NoError) {
-        std::string err = "[LLM Explainer] Ollama error: "
-                          + reply->errorString().toStdString();
-        reply->deleteLater();
-        return err;
-    }
-
-    QByteArray data = reply->readAll();
-    reply->deleteLater();
-
-    QJsonDocument doc = QJsonDocument::fromJson(data);
-    if (doc.isNull() || !doc.isObject()) {
-        return "[LLM Explainer] Failed to parse Ollama response.";
-    }
-
-    QJsonObject obj = doc.object();
-    if (obj.contains("response")) {
-        return obj["response"].toString().toStdString();
-    }
-
-    return "[LLM Explainer] Unexpected Ollama response format.";
+    return queryOllamaImpl(m_config, prompt);
 }
 
 // ============================================================================
@@ -281,7 +304,28 @@ std::string LLMExplainer::explain(const std::string& filePath,
 }
 
 // ============================================================================
-// explainAsync  –  fire-and-forget with callback
+// explainAsync  –  fire-and-forget with callback (Phase 5 stability fix).
+//
+// Previously this used `std::thread([this, ...]).detach()` and called the
+// member queryOllama, which dereferenced m_config through `this`. If the
+// LLMExplainer was destroyed (e.g. MainWindow torn down) while the network
+// reply was still in flight, the worker thread would touch freed memory —
+// classic use-after-free.
+//
+// Fix:
+//   1. The HTTP work now lives in queryOllamaImpl(const Config&, ...) — a
+//      free function with no `this` dependency.
+//   2. We capture the *value* of m_config (configCopy) plus the prompt and
+//      callback. The lambda never references `this`. The LLMExplainer can
+//      be destroyed at any moment without affecting the in-flight request.
+//   3. Dispatch goes through QThreadPool::globalInstance() instead of
+//      std::thread::detach(). Qt manages thread lifecycle, including clean
+//      reaping at QApplication shutdown — which std::thread::detach() does
+//      not.
+//
+// Prompt format and LLM behavior are unchanged: buildPrompt() is the same,
+// queryOllamaImpl carries the same JSON payload + options that the previous
+// queryOllama() carried.
 // ============================================================================
 void LLMExplainer::explainAsync(const std::string& filePath,
                                  const std::vector<float>& features,
@@ -289,14 +333,19 @@ void LLMExplainer::explainAsync(const std::string& filePath,
                                  ExplainCallback callback,
                                  const std::string& classificationLevel) const
 {
-    std::string promptCopy = buildPrompt(filePath, features, anomalyScore,
-                                         classificationLevel);
-    Config configCopy = m_config;
+    // Build everything we need on the calling thread, while `this` is
+    // guaranteed to be alive. Then move/copy into the worker — the worker
+    // never touches `this`.
+    std::string prompt = buildPrompt(filePath, features, anomalyScore,
+                                     classificationLevel);
+    Config      configCopy = m_config;
 
-    std::thread([this, promptCopy, configCopy,
-                 callback = std::move(callback)]() {
-
-        std::string response = queryOllama(promptCopy);
+    QThreadPool::globalInstance()->start(
+        [prompt = std::move(prompt),
+         configCopy = std::move(configCopy),
+         cb = std::move(callback)]() mutable
+    {
+        std::string response = queryOllamaImpl(configCopy, prompt);
 
         bool success = !response.empty() &&
                        response.find("[LLM Explainer]") == std::string::npos;
@@ -306,8 +355,14 @@ void LLMExplainer::explainAsync(const std::string& filePath,
             success = false;
         }
 
-        if (callback) {
-            callback(response, success);
+        if (cb) {
+            // NOTE: callback runs on the QThreadPool worker thread. Callers
+            // that need to touch Qt widgets must marshal via
+            // QMetaObject::invokeMethod(receiver, ..., Qt::QueuedConnection)
+            // or capture a QPointer<QObject> and check it. The synchronous
+            // path (LLMExplainer::explain) is still recommended when the
+            // caller is already on a worker thread.
+            cb(response, success);
         }
-    }).detach();
+    });
 }
