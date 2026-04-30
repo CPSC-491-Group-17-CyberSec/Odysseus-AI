@@ -142,8 +142,10 @@ float EmberDetector::score(const std::vector<float>& rawFeatures) const
     // Scale the feature vector
     std::vector<double> scaled(EMBER_FEATURES);
     for (int i = 0; i < EMBER_FEATURES; ++i) {
-        scaled[i] = (static_cast<double>(rawFeatures[i]) - m_impl->mean[i])
-                     / m_impl->scale[i];
+        const double s = m_impl->scale[i];
+        scaled[i] = (s > 1e-10)
+            ? (static_cast<double>(rawFeatures[i]) - m_impl->mean[i]) / s
+            : 0.0;
     }
 
     // Run LightGBM prediction

@@ -148,11 +148,14 @@ struct FileTypeProfile {
     IndicatorThresholds thresholds;
 
     // Classification thresholds on the CALIBRATED (not raw) score
-    float cleanCeiling     = 0.30f;  // below this = Clean
-    float anomalousCeiling = 0.55f;  // below this = Anomalous
-    float suspiciousCeiling= 0.80f;  // below this = Suspicious; above = Critical
+    float cleanCeiling     = 0.40f;  // below this = Clean
+    float anomalousCeiling = 0.65f;  // below this = Anomalous
+    float suspiciousCeiling= 0.85f;  // below this = Suspicious; above = Critical
 
-    // Minimum strong indicators required for each level
+    // Minimum strong indicators required for each classification level.
+    // minStrongForAnomalous: prevents statistical noise from generating findings
+    // when no concrete malicious signal is present.
+    int minStrongForAnomalous  = 1;   // default: at least one concrete indicator
     int minStrongForSuspicious = 1;
     int minStrongForCritical   = 2;
 };
@@ -195,10 +198,11 @@ inline FileTypeProfile PEBinary()
     p.thresholds.highByteRatioStrong = 0.40f;
     p.thresholds.suspiciousApiStrong = 0.3f;
 
-    // Classification
-    p.cleanCeiling      = 0.40f;
-    p.anomalousCeiling   = 0.60f;
-    p.suspiciousCeiling  = 0.85f;
+    // Classification — raised: PE model is well-calibrated, require real signal
+    p.cleanCeiling         = 0.50f;
+    p.anomalousCeiling     = 0.70f;
+    p.suspiciousCeiling    = 0.88f;
+    p.minStrongForAnomalous  = 1;
     p.minStrongForSuspicious = 1;
     p.minStrongForCritical   = 2;
 
@@ -236,9 +240,10 @@ inline FileTypeProfile Script()
     p.thresholds.suspiciousApiStrong = 0.2f;
     p.thresholds.base64Strong        = 0.3f;
 
-    p.cleanCeiling      = 0.35f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.45f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 1;
     p.minStrongForSuspicious = 1;
     p.minStrongForCritical   = 2;
 
@@ -287,10 +292,11 @@ inline FileTypeProfile WebContent()
     p.thresholds.printableAsciiLow   = 0.5f;
 
     // Classification: conservative — need strong evidence for HTML
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
-    p.minStrongForSuspicious = 2;  // need 2 strong indicators (was 1 for PE)
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 2;
+    p.minStrongForSuspicious = 2;
     p.minStrongForCritical   = 3;
 
     return p;
@@ -327,9 +333,10 @@ inline FileTypeProfile TextData()
     p.thresholds.highByteRatioStrong = 0.10f;  // any non-ASCII is suspect in text
     p.thresholds.suspiciousApiStrong = 0.15f;
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.50f;
-    p.suspiciousCeiling  = 0.75f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.65f;
+    p.suspiciousCeiling    = 0.82f;
+    p.minStrongForAnomalous  = 2;
     p.minStrongForSuspicious = 2;
     p.minStrongForCritical   = 3;
 
@@ -370,9 +377,10 @@ inline FileTypeProfile Archive()
     p.thresholds.entropyWeak         = 7.5f;
     p.thresholds.highByteRatioStrong = 0.60f;  // expected for compressed data
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 2;
     p.minStrongForSuspicious = 2;
     p.minStrongForCritical   = 3;
 
@@ -409,9 +417,10 @@ inline FileTypeProfile Installer()
     p.thresholds.entropyWeak         = 6.5f;
     p.thresholds.highByteRatioStrong = 0.50f;
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 2;
     p.minStrongForSuspicious = 2;
     p.minStrongForCritical   = 3;
 
@@ -449,9 +458,10 @@ inline FileTypeProfile MediaBinary()
     p.thresholds.entropyWeak         = 7.0f;
     p.thresholds.highByteRatioStrong = 0.70f;
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 2;
     p.minStrongForSuspicious = 2;
     p.minStrongForCritical   = 3;
 
@@ -499,11 +509,12 @@ inline FileTypeProfile SourceCode()
     p.thresholds.suspiciousApiStrong = 0.5f;    // high bar: source talks about APIs
     p.thresholds.base64Strong        = 0.6f;    // high bar: examples are normal
 
-    // Classification: very conservative
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
-    p.minStrongForSuspicious = 3;   // need strong evidence to flag source code
+    // Classification: very conservative — source code is nearly always benign
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 3;
+    p.minStrongForSuspicious = 3;
     p.minStrongForCritical   = 4;
 
     return p;
@@ -546,9 +557,10 @@ inline FileTypeProfile CompiledArtifact()
     p.thresholds.highByteRatioStrong = 0.70f;  // very high: expected for binary
     p.thresholds.suspiciousApiStrong = 0.4f;
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 3;
     p.minStrongForSuspicious = 3;
     p.minStrongForCritical   = 4;
 
@@ -589,9 +601,10 @@ inline FileTypeProfile BuildOutput()
     p.thresholds.highByteRatioStrong = 0.10f;
     p.thresholds.suspiciousApiStrong = 0.5f;
 
-    p.cleanCeiling      = 0.30f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.42f;
+    p.anomalousCeiling     = 0.68f;
+    p.suspiciousCeiling    = 0.85f;
+    p.minStrongForAnomalous  = 3;
     p.minStrongForSuspicious = 3;
     p.minStrongForCritical   = 4;
 
@@ -615,9 +628,10 @@ inline FileTypeProfile Unknown()
         {1.0f,  1.0f}
     };
 
-    p.cleanCeiling      = 0.35f;
-    p.anomalousCeiling   = 0.55f;
-    p.suspiciousCeiling  = 0.80f;
+    p.cleanCeiling         = 0.47f;
+    p.anomalousCeiling     = 0.70f;
+    p.suspiciousCeiling    = 0.87f;
+    p.minStrongForAnomalous  = 1;
     p.minStrongForSuspicious = 1;
     p.minStrongForCritical   = 2;
 
@@ -946,7 +960,16 @@ inline ClassificationResult classifyFileCalibrated(
         return cr;
     }
 
-    // ── Anomalous: above clean ceiling but insufficient indicators ─────
+    // ── Anomalous: above clean ceiling, but require minStrongForAnomalous.
+    // Without a concrete indicator, statistical noise alone is not enough
+    // to file a finding — suppress as Clean.
+    if (indicators.strongCount < profile.minStrongForAnomalous) {
+        cr.level = ClassificationLevel::Clean;
+        cr.severity = SeverityLevel::Low;
+        cr.suppressed = true;
+        return cr;
+    }
+
     cr.level = ClassificationLevel::Anomalous;
     cr.severity = (finalScore >= profile.anomalousCeiling)
                   ? SeverityLevel::Medium

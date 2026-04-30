@@ -142,9 +142,20 @@ void FileScannerWorker::buildFilterLists()
     if (linCtx) {
         m_skipDirFragments.append({
             "/proc/", "/sys/", "/dev/", "/run/",
+            // Steam runtime containers (already skipped)
             "/steamrt", "/steam-runtime",
             "/steamlinuxruntime",
             "/pressure-vessel", "/pv-runtime",
+            // Steam game library — game assets, Proton DLLs, shader caches.
+            // These generate massive FP noise (high-entropy packed game data,
+            // Proton/Wine PE DLLs that look suspicious to the PE model).
+            // The Steam client itself verifies file integrity via depot hashes.
+            "/steamapps/common/",
+            "/steamapps/shadercache/",
+            "/steamapps/downloading/",
+            "/steamapps/temp/",
+            "/.steam/steam/steamapps/",
+            "/.local/share/Steam/steamapps/",
             "/.cache/pip", "/.cache/yarn",
             "/.cache/npm", "/.cache/cargo",
             "/go/pkg/mod/cache",
@@ -175,6 +186,10 @@ void FileScannerWorker::buildFilterLists()
             "/Xcode.app/",
             "/DerivedData/",
             "/Developer/Platforms/",
+            // Steam game library (macOS)
+            "/steamapps/common/",
+            "/steamapps/shadercache/",
+            "/Library/Application Support/Steam/steamapps/",
         });
     }
     if (winCtx) {
@@ -212,6 +227,38 @@ void FileScannerWorker::buildFilterLists()
         // Chromium/Electron resources
         "pak",                         // Chromium resource pack
         "asar",                        // Electron archive
+        // Game engine and asset formats
+        // These are binary data files — they will never appear in a malware
+        // hash database and generate severe false positives, especially for
+        // packed/encrypted game assets (high entropy by design).
+        "tga",                         // Targa image (Valve, Quake engines)
+        "spr",                         // Valve sprite
+        "vtf",                         // Valve Texture Format
+        "vmt",                         // Valve Material Type
+        "bsp",                         // BSP map (Quake/Source engine)
+        "mdl",                         // 3D model (Source, Quake)
+        "vpk",                         // Valve Pak archive
+        "nav",                         // Navigation mesh
+        "vvd",                         // Vertex animation data
+        "dx80", "dx90",                // DirectX mesh data
+        "gcf",                         // Game Cache File (legacy Steam)
+        "acf",                         // Steam app config / manifest
+        "ncf",                         // Node Content File (Steam)
+        "pcf",                         // Particle effect file
+        "vtx",                         // Vertex strip file
+        "phy",                         // Physics collision data
+        "ani",                         // Animation file
+        "ain",                         // AI node file
+        "lmp",                         // Quake lump / Doom lump
+        "wad",                         // Quake/Doom texture archive
+        "pk3", "pk4",                  // Quake III / Quake 4 pak
+        "pak",                         // Quake I/II pak (also Chromium above)
+        "res",                         // Half-Life resource file
+        "xtx", "dds",                  // DirectDraw Surface / Nintendo textures
+        "pvr",                         // PowerVR texture
+        "ktx",                         // Khronos texture
+        "hdr",                         // HDR image (game skyboxes)
+        "exr",                         // OpenEXR (VFX / game rendering)
     };
 }
 

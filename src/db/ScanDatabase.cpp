@@ -363,8 +363,9 @@ void ScanDatabase::saveScanRecord(const ScanRecord& record)
                 continue;
             }
 
-            // Compute hash in the writer thread (not UI thread) – I/O-heavy.
-            QString hash = computeSha256(sf.filePath);
+            // Use the hash already computed by the scanner worker; fall back to
+            // recomputing only if the field is somehow empty (manual report injection).
+            QString hash = sf.sha256.isEmpty() ? computeSha256(sf.filePath) : sf.sha256;
 
             bindInt64(fstmt,  1, scanId);
             bindText (fstmt,  2, sf.filePath);

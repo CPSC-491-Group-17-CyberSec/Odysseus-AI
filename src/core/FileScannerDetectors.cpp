@@ -41,6 +41,7 @@
 #include <QMutex>
 #include <iostream>
 #include <iomanip>
+#include <unordered_set>
 
 // ============================================================================
 // Singleton detector – loaded once, shared by all scanner instances
@@ -225,13 +226,26 @@ bool checkByAI(const QString& filePath,
     if (rawScore < 0.0f)
         return false;  // extraction or inference error
 
-    // ── Stage 1b: EMBER DETECTION (v4, PE files only) ───────────────────
-    // If the file is a PE, run a second inference pass with the 2381-feature
-    // EMBER vector.  Tries LightGBM native (~96.5%) first, falls back to
-    // ONNX distilled (~86.5%).  Uses max(v2_score, v4_score) as raw score.
+    // Extract extension early — needed for both EMBER gating and classification.
+    std::string ext = extractExtension(filePath.toStdString());
+
+    // ── Stage 1b: EMBER DETECTION (v4, PE executables only) ─────────────
+    // EMBER was trained exclusively on PE binaries. Running it on ELF/Mach-O,
+    // scripts, or documents produces meaningless scores and inflates FPs.
+    // Gate: isPE feature flag AND the extension must be a Windows executable
+    // type (or no extension — common for dropped malware payloads).
+    // ELF/Mach-O files use the v2/v3 model only with appropriate calibration.
+    static const auto isEmberCandidate = [](const std::string& ext) -> bool {
+        static const std::unordered_set<std::string> peExts = {
+            "exe", "dll", "sys", "ocx", "drv", "cpl", "scr", "ax", "mui",
+            ""    // no extension — dropped malware payloads
+        };
+        return peExts.count(ext) > 0;
+    };
+
     float emberScore = -1.0f;
 
-    if (features[16] > 0.5f) {  // features[16] = isPE flag from v2/v3
+    if (features[16] > 0.5f && isEmberCandidate(ext)) {  // isPE flag + PE extension
         ensureInitialized();
 
         std::vector<float> emberFeatures = extractEmberFeatures(filePath.toStdString());
@@ -262,7 +276,6 @@ bool checkByAI(const QString& filePath,
     }
 
     // ── CLASSIFICATION (Phase 2: calibrated per-type pipeline) ───────────
-    std::string ext = extractExtension(filePath.toStdString());
     float baseThreshold = det->threshold();
 
     // If extension-based categorization returns Unknown, try filename-based

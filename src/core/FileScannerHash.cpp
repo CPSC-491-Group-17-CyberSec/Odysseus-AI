@@ -24,6 +24,7 @@
 
 #include "reputation/ReputationDB.h"
 #include "reputation/CodeSigning.h"
+#include "reputation/CodeSigning.h"
 #include "core/ScannerConfig.h"
 
 #include <QFile>
@@ -264,9 +265,10 @@ void FileScannerWorker::runHashWorker()
         m_cacheMisses.fetchAndAddRelaxed(1);
 
         QString reason, category;
-        bool    flagged  = false;
-        QString sha256;           // P2: populated by checkByHash even on miss
-        SuspiciousFile sf;        // pre-allocate; downstream passes populate fields
+        bool    flagged    = false;
+        bool    aiOnlyFlag = false;   // true when only the AI pass triggered
+        QString sha256;               // P2: populated by checkByHash even on miss
+        SuspiciousFile sf;            // pre-allocate; downstream passes populate fields
 
         // --- Detection pass 1: known-hash lookup ---
         if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category, sha256)) {
@@ -283,7 +285,8 @@ void FileScannerWorker::runHashWorker()
         }
         // --- Detection pass 3: AI anomaly scoring (fallback) ---
         else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
-            flagged = true;
+            flagged    = true;
+            aiOnlyFlag = true;  // track: only AI triggered, no hash/YARA corroboration
             // Map anomalyScore (0.0-1.0) → confidence percentage.
             const float thr = (sf.anomalyThreshold > 0.0f) ? sf.anomalyThreshold : 0.5f;
             const float adj = (sf.anomalyScore - thr) / std::max(0.001f, 1.0f - thr);
@@ -319,20 +322,23 @@ void FileScannerWorker::runHashWorker()
                     sf.signingStatus        = rr.signingStatus;
                     sf.signerId             = rr.signerId;
                     rep->recordSighting(sf.sha256);
-                } else if (cfg.reputationAutoUpsert) {
+                } else if (cfg.reputationAutoUpsert && !aiOnlyFlag) {
+                    // Only persist YARA-confirmed findings into the reputation DB.
+                    // AI-only detections are NOT upserted: the ML model's output
+                    // is probabilistic, and adding it to the hash blocklist creates
+                    // a self-reinforcing FP loop (AI guess → hash hit → Critical
+                    // on every future scan, bypassing all threshold tuning).
                     ReputationRecord newRec;
                     newRec.sha256   = sf.sha256;
                     newRec.family   = !sf.yaraFamily.isEmpty()
                                           ? sf.yaraFamily
-                                          : QStringLiteral("Unknown/AI-flagged");
-                    newRec.source   = !sf.yaraMatches.isEmpty()
-                                          ? QStringLiteral("YARA/local")
-                                          : QStringLiteral("AI/local");
+                                          : QStringLiteral("YARA-flagged");
+                    newRec.source   = QStringLiteral("YARA/local");
                     newRec.severity = severityFromText(sf.severityLevel);
                     rep->upsert(newRec);
                     if (cfg.verboseLogging) {
                         qDebug().noquote()
-                            << "[Reputation] upserted new flagged hash"
+                            << "[Reputation] upserted YARA-confirmed hash"
                             << sf.sha256.left(12) + "..."
                             << "(family:" << newRec.family << ")";
                     }
@@ -340,21 +346,51 @@ void FileScannerWorker::runHashWorker()
             }
 
             // ── Code-signing check (gated by config) ──
-            if (rep && cfg.codeSigningEnabled
-                && sf.signingStatus < 0
-                && !sf.sha256.isEmpty())
-            {
+            // Always run for flagged files when enabled. For AI-only findings,
+            // a trusted signature downgrades or removes the finding entirely
+            // to cut FPs on legitimately-signed system and commercial binaries.
+            if (cfg.codeSigningEnabled && sf.signingStatus < 0) {
                 CodeSigning::Result cs = CodeSigning::verifyFile(item.filePath);
                 sf.signingStatus = CodeSigning::statusToInt(cs.status);
                 sf.signerId      = cs.signerId;
 
-                if (cfg.reputationAutoUpsert) {
+                if (rep && cfg.reputationAutoUpsert && !sf.sha256.isEmpty()) {
                     ReputationRecord upd;
                     upd.sha256        = sf.sha256;
                     upd.signingStatus = sf.signingStatus;
                     upd.signerId      = sf.signerId;
                     rep->upsert(upd);
                 }
+
+                // For AI-only findings, apply trust-based downgrade:
+                //   Trusted + Anomalous  → unflag entirely (signed software with weak signal)
+                //   Trusted + Suspicious → downgrade to Anomalous (still surfaced, lower severity)
+                //   Trusted + Critical   → unchanged (strong signal regardless of signature)
+                //   Hash/YARA findings   → unchanged (concrete match overrides signing status)
+                if (aiOnlyFlag && cs.status == CodeSigning::Status::SignedTrusted) {
+                    if (sf.classificationLevel == "Anomalous") {
+                        flagged = false;   // weak AI signal on trusted-signed file = FP
+                    } else if (sf.classificationLevel == "Suspicious") {
+                        sf.classificationLevel = "Anomalous";
+                        sf.severityLevel       = "Low";
+                        sf.confidencePct       = std::min(sf.confidencePct * 0.35f, 20.0f);
+                        reason += "\n[Note: signed by trusted authority — severity downgraded]";
+                    }
+                }
+            }
+
+            if (!flagged) {
+                // Unflagged by code-signing trust check — record as clean.
+                CacheEntry ce;
+                ce.filePath       = item.filePath;
+                ce.lastModifiedMs = item.lastModifiedMs;
+                ce.lastModified   = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs)
+                                        .toString(Qt::ISODate);
+                ce.fileSize       = item.fileSize;
+                ce.isFlagged      = false;
+                localCache.append(std::move(ce));
+                if (localCache.size() >= 500) flushLocalCache();
+                continue;
             }
 
             // Thread-safe: queued connection delivers to the UI thread.

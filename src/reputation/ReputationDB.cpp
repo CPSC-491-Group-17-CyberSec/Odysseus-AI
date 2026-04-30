@@ -227,9 +227,16 @@ QHash<QString, QString> ReputationDB::snapshotHashIndex() const
     if (!m_db) return out;
     QMutexLocker lock(&m_mutex);
 
+    // Exclude rows auto-upserted by the AI scanner (source='AI/local').
+    // Those entries are ML guesses, not confirmed malware — including them
+    // causes a feedback loop where AI FPs become permanent hash-pass hits.
+    // Only curated sources (seed file, YARA-confirmed, manual import) feed
+    // the hash blocklist used during scanning.
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(m_db, "SELECT sha256, family FROM reputation;", -1,
-                           &stmt, nullptr) != SQLITE_OK) return out;
+    if (sqlite3_prepare_v2(m_db,
+            "SELECT sha256, family FROM reputation "
+            "WHERE source IS NULL OR source != 'AI/local';",
+            -1, &stmt, nullptr) != SQLITE_OK) return out;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const unsigned char* h = sqlite3_column_text(stmt, 0);
@@ -241,6 +248,28 @@ QHash<QString, QString> ReputationDB::snapshotHashIndex() const
     }
     sqlite3_finalize(stmt);
     return out;
+}
+
+int ReputationDB::pruneAIUpserted()
+{
+    if (!m_db) return 0;
+    QMutexLocker lock(&m_mutex);
+
+    const char* sql = "DELETE FROM reputation WHERE source = 'AI/local';";
+    char* err = nullptr;
+    if (sqlite3_exec(m_db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+        qWarning() << "[Reputation] pruneAIUpserted failed:" << (err ? err : "?");
+        sqlite3_free(err);
+        return 0;
+    }
+    const int deleted = sqlite3_changes(m_db);
+    if (deleted > 0)
+        qInfo().noquote()
+            << QString("[Reputation] Pruned %1 AI-auto-upserted row(s) "
+                       "(source='AI/local'). These were ML guesses, not "
+                       "confirmed malware, and were causing false positives.")
+                   .arg(deleted);
+    return deleted;
 }
 
 QHash<QString, ReputationRecord> ReputationDB::snapshotFullRecords() const

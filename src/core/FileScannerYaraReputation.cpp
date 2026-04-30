@@ -126,6 +126,14 @@ ReputationDB* getReputationDB()
     }
 
     g_repDb = db;
+
+    // Remove any AI-auto-upserted entries from previous scans. Those entries
+    // carry source='AI/local' and were written by runHashWorker() when a file
+    // was flagged by the ML model alone. They are NOT confirmed malware and
+    // cause a self-reinforcing false positive loop (AI FP → hash DB entry →
+    // permanent "Critical" classification on every subsequent scan).
+    db->pruneAIUpserted();
+
     const int rows = db->rowCount();
     qInfo().noquote()
         << QString("[Reputation] DB ready at %1 — %2 row(s) loaded%3")

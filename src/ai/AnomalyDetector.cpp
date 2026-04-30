@@ -31,6 +31,7 @@
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cstdlib>
 
 // ============================================================================
 // PImpl
@@ -192,9 +193,11 @@ float AnomalyDetector::score(const std::vector<float>& features) const
             m_impl->outputNamePtrs.size());
 
         // ── Diagnostic: dump all output tensors ────────────────────────
-        // This logging is critical for diagnosing score pipeline issues.
-        // Set ODYSSEUS_DIAG=1 env var to enable, or always enable in debug.
-        bool diagEnabled = true;  // TODO: gate behind env var for production
+        // Gate behind ODYSSEUS_DIAG=1 env var to avoid stdout spam in production.
+        static const bool diagEnabled = []() {
+            const char* v = std::getenv("ODYSSEUS_DIAG");
+            return v && v[0] == '1';
+        }();
         if (diagEnabled && !outputTensors.empty()) {
             std::cout << "[DIAG:ONNX] " << outputTensors.size() << " output tensor(s)";
             for (size_t t = 0; t < outputTensors.size(); ++t) {

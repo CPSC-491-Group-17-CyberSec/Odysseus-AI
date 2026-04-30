@@ -141,6 +141,13 @@ public:
     /// Returns the number of new rows inserted.
     int importFromTextFile(const QString& path, const QString& source);
 
+    /// Remove all rows that were auto-upserted by the AI scanner (source='AI/local').
+    /// These entries are unreliable — they represent files the ML model was uncertain
+    /// about on a previous scan, not confirmed malware. Call once at startup to
+    /// clear a poisoned database, and after changing AI thresholds.
+    /// Returns the number of rows deleted.
+    int pruneAIUpserted();
+
 private:
     bool createSchema();
     bool seedFromBlocklist(const QString& path);
