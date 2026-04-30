@@ -11,39 +11,38 @@
 // Thread safety: LGBM_BoosterPredictForMatSingleRow is thread-safe.
 // ============================================================================
 
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
 
-class EmberDetector
-{
-public:
-    EmberDetector();
-    ~EmberDetector();
+class EmberDetector {
+ public:
+  EmberDetector();
+  ~EmberDetector();
 
-    // Non-copyable
-    EmberDetector(const EmberDetector&) = delete;
-    EmberDetector& operator=(const EmberDetector&) = delete;
+  // Non-copyable
+  EmberDetector(const EmberDetector&) = delete;
+  EmberDetector& operator=(const EmberDetector&) = delete;
 
-    /// Load the LightGBM model and scaler files.
-    ///   modelPath:  path to ember_lgbm_model.txt
-    ///   scalerPath: path to ember_scaler.bin
-    /// Returns true on success.
-    bool load(const std::string& modelPath, const std::string& scalerPath);
+  /// Load the LightGBM model and scaler files.
+  ///   modelPath:  path to ember_lgbm_model.txt
+  ///   scalerPath: path to ember_scaler.bin
+  /// Returns true on success.
+  bool load(const std::string& modelPath, const std::string& scalerPath);
 
-    /// Returns true if model + scaler are loaded.
-    bool isLoaded() const;
+  /// Returns true if model + scaler are loaded.
+  bool isLoaded() const;
 
-    /// Score a raw (unscaled) 2381-feature EMBER vector.
-    /// Applies scaling internally, then runs LightGBM inference.
-    /// Returns probability of malware in [0.0, 1.0].
-    /// Returns -1.0f on error.
-    float score(const std::vector<float>& rawFeatures) const;
+  /// Score a raw (unscaled) 2381-feature EMBER vector.
+  /// Applies scaling internally, then runs LightGBM inference.
+  /// Returns probability of malware in [0.0, 1.0].
+  /// Returns -1.0f on error.
+  float score(const std::vector<float>& rawFeatures) const;
 
-    /// Convenience: extract EMBER features from a PE file and score it.
-    float scoreFile(const std::string& filePath) const;
+  /// Convenience: extract EMBER features from a PE file and score it.
+  float scoreFile(const std::string& filePath) const;
 
-private:
-    struct Impl;
-    std::unique_ptr<Impl> m_impl;
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
 };

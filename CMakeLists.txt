@@ -8,9 +8,43 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
+# ============================================================================
+#  Build dependencies — supported platforms: macOS (Apple Silicon), Linux
+#  (Debian/Ubuntu/Fedora/Arch). Windows builds are not supported in this
+#  pass; CMake will not stop you from running on Windows but several
+#  required libraries (Qt6Charts, YARA, etc.) need separate Windows
+#  installation steps that are not documented here.
+#
+#  REQUIRED:
+#    • Qt6  (Widgets + Network + Charts)
+#
+#  OPTIONAL (graceful fallback if missing):
+#    • ONNX Runtime — AI anomaly detection
+#    • LightGBM     — native EMBER PE detection (~96.5% accuracy)
+#    • libyara      — YARA rule scanning (Phase 1)
+# ============================================================================
 
-# Copy the malware hash database next to the executable at build time
+find_package(Qt6 QUIET COMPONENTS Widgets Network Charts)
+if(NOT Qt6_FOUND)
+    message(FATAL_ERROR
+        "Qt6 (Widgets + Network + Charts) is REQUIRED but was not found.\n"
+        "  • macOS  : brew install qt\n"
+        "  • Debian : sudo apt install qt6-base-dev qt6-charts-dev\n"
+        "  • Fedora : sudo dnf install qt6-qtbase-devel qt6-qtcharts-devel\n"
+        "  • Arch   : sudo pacman -S qt6-base qt6-charts\n"
+        "If Qt6 is installed in a non-standard location, point CMake at it:\n"
+        "  cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/qt6/lib/cmake")
+endif()
+if(NOT TARGET Qt6::Charts)
+    message(FATAL_ERROR
+        "Qt6::Charts component is missing. Install it with:\n"
+        "  • macOS  : brew install qt          (Charts is bundled)\n"
+        "  • Debian : sudo apt install qt6-charts-dev\n"
+        "  • Fedora : sudo dnf install qt6-qtcharts-devel")
+endif()
+
+# Copy the malware hash database AND YARA rules next to the executable at build time.
+# The data/ tree contains: malware_hashes.txt, yara_rules/, anomaly_model_*.onnx, etc.
 file(COPY ${CMAKE_SOURCE_DIR}/data DESTINATION ${CMAKE_BINARY_DIR})
 
 qt_add_resources(APP_RESOURCES resources/resources.qrc)
@@ -22,6 +56,53 @@ add_executable(main
     src/ui/MainWindow/MainWindow.cpp
     src/ui/ThreatCard/ThreatCard.cpp
     src/ui/ScanTypeOverlay/ScanTypeOverlay.cpp
+    src/ui/SystemStatusPanel/SystemStatusPanel.cpp  # Phase 2 system status panel
+    # Phase 4 – UI redesign (Step 1: theme + sidebar shell)
+    src/ui/theme/DashboardTheme.cpp
+    src/ui/widgets/Sidebar.cpp
+    # Phase 4 – Step 2: Dashboard widgets + page
+    src/ui/widgets/StatCard.cpp
+    src/ui/widgets/DonutChart.cpp
+    src/ui/widgets/ScanTypeSelector.cpp
+    src/ui/widgets/SecurityScoreCard.cpp
+    src/ui/widgets/ActivityList.cpp
+    src/ui/pages/DashboardPage.cpp
+    # Phase 4 – Step 3: right-slide threat detail panel
+    src/ui/widgets/ThreatDetailPanel.cpp
+    # Phase 4 – Step 4: settings page + toggle widgets
+    src/ui/widgets/ToggleRow.cpp
+    src/ui/pages/SettingsPage.cpp
+    # Phase 4 – Refactor: ResultsPage + reusable components
+    src/ui/widgets/ThreatRow.cpp
+    src/ui/widgets/DetailSection.cpp
+    src/ui/pages/ResultsPage.cpp
+    # Phase 4 – Scan page redesign
+    src/ui/widgets/DropArea.cpp
+    src/ui/pages/ScanPage.cpp
+    # Phase 4 – EDR-Lite continuous monitoring (Beta)
+    src/edr/SnapshotDiff.cpp
+    src/edr/MonitoringService.cpp
+    src/edr/SecurityScoreEngine.cpp     # risk-based scoring (Score.A)
+    src/ui/pages/AlertsPage.cpp
+    # Phase 4 – Alerts UX polish (reusable widgets)
+    src/ui/widgets/SeverityBadge.cpp
+    src/ui/widgets/AlertRow.cpp
+    src/ui/widgets/FilterBar.cpp
+    src/ui/widgets/AlertDetailPanel.cpp
+    # AlertTypes.h + MonitoringService.h need explicit listing for AUTOMOC
+    # because they live under include/ rather than next to the .cpp.
+    include/edr/MonitoringService.h
+    # Phase 5 – Response & Control Layer (Allowlist / Quarantine / ActionLog
+    # / ResponseManager). Self-contained C++17 — no external deps. Wired into
+    # MainWindow + ResultsPage + the scanner allowlist-suppression path.
+    src/response/ResponseTypes.cpp
+    src/response/Allowlist.cpp
+    src/response/Quarantine.cpp
+    src/response/ActionLog.cpp
+    src/response/ResponseManager.cpp
+    src/response/ResponseManagerSingleton.cpp   # process-wide accessor
+    src/ui/ResponsePanel.cpp                    # framework-agnostic helpers
+    src/ui/pages/QuarantinePage.cpp             # Phase 5 — Quarantine list+restore UI
     # Scanner engine – FileScanner.cpp is the AUTOMOC anchor (includes the header
     # so CMake generates moc_FileScanner.cpp). All implementations are in the
     # focused TUs below, compiled with per-file optimization flags.
@@ -30,6 +111,8 @@ add_executable(main
     src/core/FileScannerHash.cpp    # hash DB + SHA-256 detection (-O3)
     src/core/FileScannerEngine.cpp  # doScan loop + FileScanner controller (-O2)
     src/core/FileScannerDetectors.cpp  # AI anomaly detection pass
+    src/core/FileScannerYaraReputation.cpp  # YARA pass + reputation singletons (Phase 1)
+    src/core/ScannerConfig.cpp      # Phase 1.5 – per-feature toggles
     # AI / ML subsystem
     src/ai/FeatureExtractor.cpp    # 38-feature vector extraction (v2/v3)
     src/ai/EmberFeatureExtractor.cpp # 2381-feature EMBER PE extraction (v4)
@@ -37,15 +120,43 @@ add_executable(main
     src/ai/AnomalyDetector.cpp     # ONNX Runtime inference wrapper
     src/ai/LLMExplainer.cpp        # Ollama-based LLM threat explanation
     src/db/ScanDatabase.cpp        # SQLite persistence layer
+    src/db/CacheVersion.cpp        # Phase 5 — model/rules/config invalidation
     src/db/sqlite3.c               # SQLite amalgamation – no install required
+    # Phase 1 – YARA + reputation + code signing
+    src/scanner/YaraScanner.cpp        # libyara wrapper (3rd detection pass)
+    src/reputation/ReputationDB.cpp    # structured local reputation database
+    src/reputation/CodeSigning.cpp     # codesign / signature verification
+    # Phase 2 – System monitoring
+    src/monitor/ProcessEnumerator.cpp  # macOS sysctl + Linux /proc process listing
+    src/monitor/PersistenceScanner.cpp # LaunchAgents/Daemons + cron + systemd
+    src/monitor/SuspiciousHeuristics.cpp # process-flagging logic
+    src/monitor/SystemMonitor.cpp      # orchestrator QObject
+    # Header listed explicitly so AUTOMOC scans it (it lives under include/
+    # rather than next to the .cpp, which breaks AUTOMOC's same-directory
+    # auto-pairing rule).
+    include/monitor/SystemMonitor.h
+    # Phase 3 – Rootkit awareness (user-space only)
+    src/rootkit/ProcessCrossView.cpp        # sysctl ↔ ps PID-set diff
+    src/rootkit/KernelExtensionScanner.cpp  # systemextensionsctl + kmutil
+    src/rootkit/IntegrityChecker.cpp        # critical-path SHA-256 baseline
+    src/rootkit/RootkitMonitor.cpp          # orchestrator (plain namespace)
 )
 
 target_include_directories(main PRIVATE
     src/core
-    include           # ai/FeatureExtractor.h, ai/AnomalyDetector.h
+    src               # for src/scanner/, src/reputation/, src/db/
+    include           # ai/FeatureExtractor.h, ai/AnomalyDetector.h, scanner/, reputation/
 )
 
-target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network)
+target_link_libraries(main PRIVATE Qt6::Widgets Qt6::Network Qt6::Charts)
+
+# ── Windows platform libraries ───────────────────────────────────────────────
+# advapi32 — registry (RegOpenKeyEx etc.; pulled by QSettings::NativeFormat too)
+# psapi    — process-image queries used by ProcessEnumerator's Windows branch
+# version  — file-version info for future Authenticode / publisher checks
+if(WIN32)
+    target_link_libraries(main PRIVATE advapi32 psapi version)
+endif()
 
 # -----------------------------
 # ONNX Runtime (optional – AI anomaly detection)
@@ -68,8 +179,11 @@ else()
         endif()
     endif()
     if(NOT ONNXRT_FOUND)
-        message(STATUS "ONNX Runtime NOT found – AI anomaly detection will be disabled "
-                       "(hash-only mode). Install onnxruntime to enable.")
+        message(STATUS "ONNX Runtime NOT found – AI anomaly detection will be DISABLED "
+                       "(hash-only mode). To enable:")
+        message(STATUS "  • macOS  : brew install onnxruntime")
+        message(STATUS "  • Debian : sudo apt install libonnxruntime-dev   (or build from source)")
+        message(STATUS "  • Other  : grab a prebuilt binary from https://github.com/microsoft/onnxruntime/releases")
     endif()
 endif()
 
@@ -81,12 +195,22 @@ endif()
 find_package(PkgConfig QUIET)
 set(LIGHTGBM_FOUND FALSE)
 
-# Try finding the library directly (Homebrew installs to /opt/homebrew)
+# Search common install locations on macOS (Homebrew x86_64 + Apple Silicon)
+# and Linux (Debian / Fedora / Arch usual paths).
 find_library(LIGHTGBM_LIBRARY NAMES _lightgbm lib_lightgbm lightgbm
-    HINTS /opt/homebrew/lib /usr/local/lib /usr/lib
+    HINTS
+        /opt/homebrew/lib                 # Apple Silicon Homebrew
+        /usr/local/lib                    # Intel Homebrew + manual builds
+        /usr/lib                          # Linux distro packages
+        /usr/lib/x86_64-linux-gnu         # Debian/Ubuntu multiarch
+        /usr/lib/aarch64-linux-gnu        # Debian/Ubuntu ARM
+        /usr/lib64                        # Fedora / RHEL 64-bit
 )
 find_path(LIGHTGBM_INCLUDE NAMES lightgbm/c_api.h
-    HINTS /opt/homebrew/include /usr/local/include /usr/include
+    HINTS
+        /opt/homebrew/include
+        /usr/local/include
+        /usr/include
 )
 
 if(LIGHTGBM_LIBRARY AND LIGHTGBM_INCLUDE)
@@ -97,8 +221,57 @@ if(LIGHTGBM_LIBRARY AND LIGHTGBM_INCLUDE)
     message(STATUS "  Library: ${LIGHTGBM_LIBRARY}")
     message(STATUS "  Include: ${LIGHTGBM_INCLUDE}")
 else()
-    message(STATUS "LightGBM NOT found – will fall back to ONNX-based EMBER detection (~86.5%). "
-                   "Install with: brew install lightgbm")
+    message(STATUS "LightGBM NOT found – falling back to ONNX-based EMBER detection (~86.5%). To enable:")
+    message(STATUS "  • macOS  : brew install lightgbm")
+    message(STATUS "  • Debian : sudo apt install liblightgbm-dev   (or build from source)")
+    message(STATUS "  • Fedora : sudo dnf install lightgbm-devel")
+endif()
+
+# -----------------------------
+# libyara (optional – YARA rule scanning, Phase 1)
+# -----------------------------
+# If libyara is installed, find and link it. If not, the build still
+# succeeds: YaraScanner.cpp compiles a stub that disables YARA detection
+# (the C macro ODY_HAS_YARA gates the real implementation).
+#
+# macOS (Apple Silicon):  brew install yara          → /opt/homebrew
+# macOS (Intel):          brew install yara          → /usr/local
+# Linux (Debian/Ubuntu):  sudo apt install libyara-dev
+# Linux (Fedora/RHEL):    sudo dnf install yara-devel
+set(YARA_FOUND FALSE)
+
+# Try pkg-config first (most reliable)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(YARA QUIET yara)
+endif()
+
+if(YARA_FOUND)
+    target_include_directories(main PRIVATE ${YARA_INCLUDE_DIRS})
+    target_link_libraries(main PRIVATE ${YARA_LIBRARIES})
+    target_link_directories(main PRIVATE ${YARA_LIBRARY_DIRS})
+    target_compile_definitions(main PRIVATE ODY_HAS_YARA=1)
+    message(STATUS "libyara found via pkg-config – YARA rule scanning enabled")
+else()
+    # Fallback: search common Homebrew/system locations directly
+    find_library(YARA_LIBRARY NAMES yara libyara
+        HINTS /opt/homebrew/lib /usr/local/lib /usr/lib /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu
+    )
+    find_path(YARA_INCLUDE_DIR NAMES yara.h
+        HINTS /opt/homebrew/include /usr/local/include /usr/include
+    )
+    if(YARA_LIBRARY AND YARA_INCLUDE_DIR)
+        target_include_directories(main PRIVATE ${YARA_INCLUDE_DIR})
+        target_link_libraries(main PRIVATE ${YARA_LIBRARY})
+        target_compile_definitions(main PRIVATE ODY_HAS_YARA=1)
+        set(YARA_FOUND TRUE)
+        message(STATUS "libyara found – YARA rule scanning enabled")
+        message(STATUS "  Library: ${YARA_LIBRARY}")
+        message(STATUS "  Include: ${YARA_INCLUDE_DIR}")
+    else()
+        message(STATUS "libyara NOT found – YARA rule scanning will be disabled "
+                       "(stub compiled). Install with: brew install yara  (macOS)")
+    endif()
 endif()
 
 # Per-file optimization flags for the hot scanner paths.
