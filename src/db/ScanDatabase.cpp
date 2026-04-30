@@ -1,6 +1,7 @@
 #include "ScanDatabase.h"
 
 #include "sqlite3.h"
+#include "db/CacheVersion.h"   // Phase 5 — model/rules/config invalidation
 
 #include <QStandardPaths>
 #include <QFileInfo>
@@ -85,6 +86,11 @@ static const char* kMigrateCacheColumns[] = {
     "ALTER TABLE scan_cache ADD COLUMN recommended_actions   TEXT;",
     "ALTER TABLE scan_cache ADD COLUMN ai_explanation        TEXT;",
     "ALTER TABLE scan_cache ADD COLUMN llm_available         INTEGER DEFAULT 0;",
+    // Phase 5 — cache versioning. NULL on existing rows → never matches a
+    // current version → those rows are treated as stale and re-scanned.
+    "ALTER TABLE scan_cache ADD COLUMN model_version         TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN rules_version         TEXT;",
+    "ALTER TABLE scan_cache ADD COLUMN config_hash           TEXT;",
     nullptr
 };
 
@@ -535,7 +541,8 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
         "SELECT file_path, last_modified, file_size, scan_result, "
         "       reason, category, classification_level, severity_level, "
         "       anomaly_score, ai_summary, key_indicators, recommended_actions, "
-        "       ai_explanation, llm_available "
+        "       ai_explanation, llm_available, "
+        "       model_version, rules_version, config_hash "
         "FROM scan_cache;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -549,16 +556,39 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
         return txt ? QString::fromUtf8(reinterpret_cast<const char*>(txt)) : QString{};
     };
 
-    int nClean = 0, nFlagged = 0;
+    // Phase 5 — current version triple. Cached after first call.
+    const QString curModel  = CacheVersion::modelVersion();
+    const QString curRules  = CacheVersion::rulesVersion();
+    const QString curConfig = CacheVersion::configHash();
+
+    int nClean = 0, nFlagged = 0, nStale = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         CacheEntry e;
         e.filePath     = colText(0);
         e.lastModified = colText(1);
-        // P5: pre-compute epoch ms so the enumerator can do integer comparisons.
+        // P5 perf: pre-compute epoch ms so the enumerator can integer-compare.
         e.lastModifiedMs = QDateTime::fromString(e.lastModified, Qt::ISODate)
                                .toMSecsSinceEpoch();
         e.fileSize     = sqlite3_column_int64(stmt, 2);
         e.isFlagged    = (colText(3) == QStringLiteral("flagged"));
+
+        // Version filter: drop rows whose stored versions don't match the
+        // current process-wide values. NULL columns (rows from before this
+        // upgrade) never match a non-empty current value, which is safe:
+        // those files get re-scanned. If the current values are themselves
+        // empty (e.g. no model file present), we keep the row (avoids
+        // wiping the cache on every dev-machine launch with no models).
+        const QString rowModel  = colText(14);
+        const QString rowRules  = colText(15);
+        const QString rowConfig = colText(16);
+        const bool versionsMatch =
+              (curModel.isEmpty()  || rowModel  == curModel)
+           && (curRules.isEmpty()  || rowRules  == curRules)
+           && (curConfig.isEmpty() || rowConfig == curConfig);
+        if (!versionsMatch) {
+            ++nStale;
+            continue;       // file gets re-scanned next time
+        }
 
         if (e.isFlagged) {
             e.reason              = colText(4);
@@ -586,8 +616,10 @@ QHash<QString, CacheEntry> ScanDatabase::loadScanCache() const
     }
     sqlite3_finalize(stmt);
 
-    qDebug() << "loadScanCache: loaded" << cache.size() << "entries"
-             << "(" << nClean << "clean," << nFlagged << "flagged)";
+    qDebug().noquote()
+        << "loadScanCache: loaded" << cache.size() << "entries"
+        << "(" << nClean << "clean," << nFlagged << "flagged)"
+        << "| dropped" << nStale << "stale (model/rules/config changed)";
     return cache;
 }
 
@@ -605,14 +637,23 @@ void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
     QVector<CacheEntry> copy = entries;
     const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
 
-    enqueueWrite([copy, now](sqlite3* db) {
+    // Phase 5 — snapshot the version triple ONCE per flush. Computed on
+    // the calling thread (UI thread on scan finish) so the writer thread
+    // doesn't pay the cost; safe because CacheVersion is mutex-guarded
+    // and these strings don't change during a scan.
+    const QString modelV  = CacheVersion::modelVersion();
+    const QString rulesV  = CacheVersion::rulesVersion();
+    const QString configV = CacheVersion::configHash();
+
+    enqueueWrite([copy, now, modelV, rulesV, configV](sqlite3* db) {
         const char* sql =
             "INSERT OR REPLACE INTO scan_cache "
             "(file_path, last_modified, last_scanned_at, file_size, scan_result, "
             " reason, category, classification_level, severity_level, "
             " anomaly_score, ai_summary, key_indicators, recommended_actions, "
-            " ai_explanation, llm_available) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+            " ai_explanation, llm_available, "
+            " model_version, rules_version, config_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
         execSql(db, "BEGIN;");
         int nClean = 0, nFlagged = 0;
@@ -636,6 +677,10 @@ void ScanDatabase::flushScanCache(const QVector<CacheEntry>& entries)
             bindText (stmt, 13, e.recommendedActions.join('\n'));
             bindText (stmt, 14, e.aiExplanation);
             sqlite3_bind_int(stmt, 15, e.llmAvailable ? 1 : 0);
+            // Phase 5 — version triple
+            bindText (stmt, 16, modelV);
+            bindText (stmt, 17, rulesV);
+            bindText (stmt, 18, configV);
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
 
