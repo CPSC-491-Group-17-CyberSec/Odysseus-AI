@@ -14,8 +14,8 @@
 //   • integrityCheckEnabled         – baseline + verify
 // ============================================================================
 
-#include "rootkit/RootkitTypes.h"
 #include "monitor/ProcessInfo.h"
+#include "rootkit/RootkitTypes.h"
 
 namespace RootkitMonitor {
 
@@ -25,7 +25,6 @@ namespace RootkitMonitor {
 ///
 /// existingProcesses – the sysctl process list captured earlier in the same
 ///                      refresh tick (passed in to avoid re-hashing)
-void scan(const QVector<ProcessInfo>& existingProcesses,
-          RootkitSnapshot&            snap);
+void scan(const QVector<ProcessInfo>& existingProcesses, RootkitSnapshot& snap);
 
 }  // namespace RootkitMonitor

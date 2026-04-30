@@ -35,58 +35,58 @@
 // number on display.
 // ============================================================================
 
-#include "AlertTypes.h"
-
+#include <QHash>
 #include <QString>
 #include <QStringList>
-#include <QHash>
+
+#include "AlertTypes.h"
 
 namespace EDR {
 
 enum class ScoreLabel {
-    Secure   = 0,    // 80–100
-    Moderate = 1,    // 50–79
-    HighRisk = 2,    // < 50
+  Secure = 0,    // 80–100
+  Moderate = 1,  // 50–79
+  HighRisk = 2,  // < 50
 };
 
 QString scoreLabelToText(ScoreLabel l);
 const char* scoreLabelHex(ScoreLabel l);
 
 struct ScoreLine {
-    int     delta;     // negative — points lost
-    QString reason;    // human-readable, e.g. "1 critical alert"
+  int delta;       // negative — points lost
+  QString reason;  // human-readable, e.g. "1 critical alert"
 };
 
 struct ScoreReport {
-    int                 score = 100;
-    ScoreLabel          label = ScoreLabel::Secure;
-    QVector<ScoreLine>  breakdown;     // ordered, biggest impact first
-    int                 activeAlerts   = 0;
-    int                 criticalCount  = 0;
-    int                 highCount      = 0;
-    int                 mediumCount    = 0;
-    int                 lowCount       = 0;
-    int                 persistentCount = 0;
+  int score = 100;
+  ScoreLabel label = ScoreLabel::Secure;
+  QVector<ScoreLine> breakdown;  // ordered, biggest impact first
+  int activeAlerts = 0;
+  int criticalCount = 0;
+  int highCount = 0;
+  int mediumCount = 0;
+  int lowCount = 0;
+  int persistentCount = 0;
 };
 
 namespace ScoreConstants {
-    // Per-severity penalties
-    constexpr int kCriticalPenalty = 30;   // each
-    constexpr int kHighPenalty     = 15;   // each
-    constexpr int kMediumPenalty   = 5;    // each
-    constexpr int kLowPenalty      = 1;    // each
+// Per-severity penalties
+constexpr int kCriticalPenalty = 30;  // each
+constexpr int kHighPenalty = 15;      // each
+constexpr int kMediumPenalty = 5;     // each
+constexpr int kLowPenalty = 1;        // each
 
-    // Caps on total per-severity loss
-    constexpr int kMediumCap       = 25;
-    constexpr int kLowCap          = 10;
+// Caps on total per-severity loss
+constexpr int kMediumCap = 25;
+constexpr int kLowCap = 10;
 
-    // Persistence threshold + extra penalty
-    constexpr int kPersistenceMinTicks = 2;   // ≥ N ticks = "persistent"
-    constexpr int kPersistencePenalty  = 10;  // extra per persistent alert
+// Persistence threshold + extra penalty
+constexpr int kPersistenceMinTicks = 2;  // ≥ N ticks = "persistent"
+constexpr int kPersistencePenalty = 10;  // extra per persistent alert
 
-    // Cross-view minimum ticks to count at all
-    constexpr int kCrossViewMinTicks   = 2;
-}
+// Cross-view minimum ticks to count at all
+constexpr int kCrossViewMinTicks = 2;
+}  // namespace ScoreConstants
 
 /// Score the supplied set of currently-ACTIVE alerts (typically from
 /// MonitoringService::activeAlerts()). Resolved alerts should NOT be

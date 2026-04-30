@@ -30,60 +30,59 @@
 // later just adds a new fromJson() case; old config files keep working.
 // ============================================================================
 
-#include <QString>
 #include <QJsonObject>
+#include <QString>
 
 // ---------------------------------------------------------------------------
 // ScannerConfig  –  plain value type (copyable, comparable)
 // ---------------------------------------------------------------------------
-struct ScannerConfig
-{
-    // ── Feature toggles ────────────────────────────────────────────────
-    bool yaraEnabled          = true;
-    bool reputationAutoUpsert = true;
-    bool codeSigningEnabled   = true;
-    bool verboseLogging       = false;
-    bool experimentalRules    = false;
+struct ScannerConfig {
+  // ── Feature toggles ────────────────────────────────────────────────
+  bool yaraEnabled = true;
+  bool reputationAutoUpsert = true;
+  bool codeSigningEnabled = true;
+  bool verboseLogging = false;
+  bool experimentalRules = false;
 
-    // ── Phase 2: System Monitoring toggles ─────────────────────────────
-    // Master switch first; the three sub-toggles are no-ops if the master
-    // is off. This lets the user kill all system probing with one flag.
-    bool systemMonitoringEnabled         = true;
-    bool processScanEnabled              = true;
-    bool persistenceScanEnabled          = true;
-    bool suspiciousProcessHeuristicsEnabled = true;
+  // ── Phase 2: System Monitoring toggles ─────────────────────────────
+  // Master switch first; the three sub-toggles are no-ops if the master
+  // is off. This lets the user kill all system probing with one flag.
+  bool systemMonitoringEnabled = true;
+  bool processScanEnabled = true;
+  bool persistenceScanEnabled = true;
+  bool suspiciousProcessHeuristicsEnabled = true;
 
-    // ── Phase 3: Rootkit Awareness toggles ─────────────────────────────
-    // All three sub-checks are user-space only. Master switch off → none
-    // of them run, regardless of the sub-toggle states.
-    bool rootkitAwarenessEnabled         = true;
-    bool processCrossViewCheckEnabled    = true;
-    bool kernelExtensionCheckEnabled     = true;
-    bool integrityCheckEnabled           = true;
+  // ── Phase 3: Rootkit Awareness toggles ─────────────────────────────
+  // All three sub-checks are user-space only. Master switch off → none
+  // of them run, regardless of the sub-toggle states.
+  bool rootkitAwarenessEnabled = true;
+  bool processCrossViewCheckEnabled = true;
+  bool kernelExtensionCheckEnabled = true;
+  bool integrityCheckEnabled = true;
 
-    // ── Phase 4: EDR-Lite continuous monitoring (BETA) ─────────────────
-    // Default disabled — user opts in via Settings. When enabled, the
-    // MonitoringService runs SystemMonitor::refresh() every
-    // monitoringIntervalSeconds and emits Alerts on diffs.
-    bool edrLiteEnabled                  = false;
-    int  monitoringIntervalSeconds       = 15;
-    bool alertOnNewProcess               = true;
-    bool alertOnNewPersistence           = true;
-    bool alertOnIntegrityMismatch        = true;
-    bool alertOnKernelExtensionChange    = true;
+  // ── Phase 4: EDR-Lite continuous monitoring (BETA) ─────────────────
+  // Default disabled — user opts in via Settings. When enabled, the
+  // MonitoringService runs SystemMonitor::refresh() every
+  // monitoringIntervalSeconds and emits Alerts on diffs.
+  bool edrLiteEnabled = false;
+  int monitoringIntervalSeconds = 15;
+  bool alertOnNewProcess = true;
+  bool alertOnNewPersistence = true;
+  bool alertOnIntegrityMismatch = true;
+  bool alertOnKernelExtensionChange = true;
 
-    // ── Tunables ───────────────────────────────────────────────────────
-    /// Subdirectory (relative to YARA rules dir) holding aggressive/noisy
-    /// rules that are skipped unless experimentalRules is true.
-    QString experimentalSubdir = "experimental";
+  // ── Tunables ───────────────────────────────────────────────────────
+  /// Subdirectory (relative to YARA rules dir) holding aggressive/noisy
+  /// rules that are skipped unless experimentalRules is true.
+  QString experimentalSubdir = "experimental";
 
-    /// Hard cap on YARA compile errors before we give up on a rules dir.
-    /// Prevents one corrupt .yar from spamming the log indefinitely.
-    int maxCompileErrors = 100;
+  /// Hard cap on YARA compile errors before we give up on a rules dir.
+  /// Prevents one corrupt .yar from spamming the log indefinitely.
+  int maxCompileErrors = 100;
 
-    // ── Serialization ──────────────────────────────────────────────────
-    QJsonObject toJson() const;
-    static ScannerConfig fromJson(const QJsonObject& obj);
+  // ── Serialization ──────────────────────────────────────────────────
+  QJsonObject toJson() const;
+  static ScannerConfig fromJson(const QJsonObject& obj);
 };
 
 // ---------------------------------------------------------------------------

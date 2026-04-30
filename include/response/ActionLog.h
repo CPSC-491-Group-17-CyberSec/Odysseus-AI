@@ -17,37 +17,37 @@
 #ifndef ODYSSEUS_RESPONSE_ACTION_LOG_H
 #define ODYSSEUS_RESPONSE_ACTION_LOG_H
 
-#include "response/ResponseTypes.h"
-
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "response/ResponseTypes.h"
+
 namespace odysseus::response {
 
 class ActionLog {
-public:
-    // Default path uses platform app-data dir.
-    ActionLog();
+ public:
+  // Default path uses platform app-data dir.
+  ActionLog();
 
-    // Custom path — useful for tests.
-    explicit ActionLog(std::string filePath);
+  // Custom path — useful for tests.
+  explicit ActionLog(std::string filePath);
 
-    // Append a record. Fills in id and timestamp if missing. Returns the
-    // assigned id on success, empty on failure (and sets getLastError()).
-    std::string append(ActionLogRecord record);
+  // Append a record. Fills in id and timestamp if missing. Returns the
+  // assigned id on success, empty on failure (and sets getLastError()).
+  std::string append(ActionLogRecord record);
 
-    // Read the entire log. Cheap for typical sizes (action log is tiny).
-    std::vector<ActionLogRecord> readAll() const;
+  // Read the entire log. Cheap for typical sizes (action log is tiny).
+  std::vector<ActionLogRecord> readAll() const;
 
-    // Diagnostics.
-    std::string getLastError() const;
-    const std::string& filePath() const { return filePath_; }
+  // Diagnostics.
+  std::string getLastError() const;
+  const std::string& filePath() const { return filePath_; }
 
-private:
-    std::string filePath_;
-    mutable std::mutex mutex_;
-    mutable std::string lastError_;
+ private:
+  std::string filePath_;
+  mutable std::mutex mutex_;
+  mutable std::string lastError_;
 };
 
 // ---------------------------------------------------------------------------

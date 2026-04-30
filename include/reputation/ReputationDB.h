@@ -31,11 +31,11 @@
 //     thread like ScanDatabase has.
 // ============================================================================
 
-#include <QString>
-#include <QStringList>
 #include <QDateTime>
 #include <QHash>
 #include <QMutex>
+#include <QString>
+#include <QStringList>
 
 struct sqlite3;
 
@@ -44,11 +44,11 @@ struct sqlite3;
 // view, not the ML model's view).
 // ---------------------------------------------------------------------------
 enum class ReputationSeverity {
-    Unknown  = 0,
-    Low      = 1,
-    Medium   = 2,
-    High     = 3,
-    Critical = 4,
+  Unknown = 0,
+  Low = 1,
+  Medium = 2,
+  High = 3,
+  Critical = 4,
 };
 
 QString severityToText(ReputationSeverity s);
@@ -57,103 +57,101 @@ ReputationSeverity severityFromText(const QString& s);
 // ---------------------------------------------------------------------------
 // ReputationRecord  –  one row in the reputation table
 // ---------------------------------------------------------------------------
-struct ReputationRecord
-{
-    QString             sha256;
-    QString             family;
-    QString             source;
-    ReputationSeverity  severity      = ReputationSeverity::Unknown;
-    QDateTime           firstSeen;
-    QDateTime           lastSeen;
-    int                 prevalence    = 0;
-    int                 signingStatus = -1;   // -1=unknown, 0=unsigned,
-                                              //  1=signed-untrusted, 2=signed-trusted
-    QString             signerId;
-    QString             notes;
+struct ReputationRecord {
+  QString sha256;
+  QString family;
+  QString source;
+  ReputationSeverity severity = ReputationSeverity::Unknown;
+  QDateTime firstSeen;
+  QDateTime lastSeen;
+  int prevalence = 0;
+  int signingStatus = -1;  // -1=unknown, 0=unsigned,
+                           //  1=signed-untrusted, 2=signed-trusted
+  QString signerId;
+  QString notes;
 
-    bool isKnown() const { return !sha256.isEmpty(); }
+  bool isKnown() const { return !sha256.isEmpty(); }
 };
 
 // ---------------------------------------------------------------------------
 // ReputationDB
 // ---------------------------------------------------------------------------
-class ReputationDB
-{
-public:
-    ReputationDB();
-    ~ReputationDB();
+class ReputationDB {
+ public:
+  ReputationDB();
+  ~ReputationDB();
 
-    /// Open or create the SQLite database alongside the application data
-    /// directory. Seeds from data/malware_hashes.txt on first run.
-    /// Returns true on success.
-    bool open(const QString& appDataDir, const QString& seedHashFile);
+  /// Open or create the SQLite database alongside the application data
+  /// directory. Seeds from data/malware_hashes.txt on first run.
+  /// Returns true on success.
+  bool open(const QString& appDataDir, const QString& seedHashFile);
 
-    /// Close the database (also called by destructor).
-    void close();
+  /// Close the database (also called by destructor).
+  void close();
 
-    bool isOpen() const { return m_db != nullptr; }
+  bool isOpen() const { return m_db != nullptr; }
 
-    /// Path of the SQLite database file (for diagnostics).
-    QString path() const { return m_dbPath; }
+  /// Path of the SQLite database file (for diagnostics).
+  QString path() const { return m_dbPath; }
 
-    // -----------------------------------------------------------------------
-    // Lookups  (read-only)
-    // -----------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // Lookups  (read-only)
+  // -----------------------------------------------------------------------
 
-    /// Look up a hash. Returns a populated ReputationRecord, or one with
-    /// empty sha256 if not known.
-    ReputationRecord lookup(const QString& sha256) const;
+  /// Look up a hash. Returns a populated ReputationRecord, or one with
+  /// empty sha256 if not known.
+  ReputationRecord lookup(const QString& sha256) const;
 
-    /// True if the given SHA-256 is in the database.
-    bool contains(const QString& sha256) const;
+  /// True if the given SHA-256 is in the database.
+  bool contains(const QString& sha256) const;
 
-    /// Number of rows.
-    int rowCount() const;
+  /// Number of rows.
+  int rowCount() const;
 
-    // -----------------------------------------------------------------------
-    // In-memory hot cache  (built once at startup for fast scanner lookup)
-    // -----------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // In-memory hot cache  (built once at startup for fast scanner lookup)
+  // -----------------------------------------------------------------------
 
-    /// Snapshot the entire reputation table into a QHash<sha256, family> for
-    /// the scan workers to use without opening a DB connection per file.
-    /// Cheap (typical DB sizes < 100k rows). Re-snapshot after large imports.
-    QHash<QString, QString> snapshotHashIndex() const;
+  /// Snapshot the entire reputation table into a QHash<sha256, family> for
+  /// the scan workers to use without opening a DB connection per file.
+  /// Cheap (typical DB sizes < 100k rows). Re-snapshot after large imports.
+  QHash<QString, QString> snapshotHashIndex() const;
 
-    /// Snapshot the full record map (used when the scanner wants metadata
-    /// beyond just the family name).
-    QHash<QString, ReputationRecord> snapshotFullRecords() const;
+  /// Snapshot the full record map (used when the scanner wants metadata
+  /// beyond just the family name).
+  QHash<QString, ReputationRecord> snapshotFullRecords() const;
 
-    // -----------------------------------------------------------------------
-    // Mutations  (writes)
-    // -----------------------------------------------------------------------
+  // -----------------------------------------------------------------------
+  // Mutations  (writes)
+  // -----------------------------------------------------------------------
 
-    /// Insert or update a reputation record. If the row already exists, the
-    /// non-empty fields of `r` overwrite, prevalence is incremented, and
-    /// last_seen is bumped to now.
-    bool upsert(const ReputationRecord& r);
+  /// Insert or update a reputation record. If the row already exists, the
+  /// non-empty fields of `r` overwrite, prevalence is incremented, and
+  /// last_seen is bumped to now.
+  bool upsert(const ReputationRecord& r);
 
-    /// Bump prevalence + last_seen for an existing hash (no-op if missing).
-    /// Useful as a side-effect of a hash hit during scan.
-    bool recordSighting(const QString& sha256);
+  /// Bump prevalence + last_seen for an existing hash (no-op if missing).
+  /// Useful as a side-effect of a hash hit during scan.
+  bool recordSighting(const QString& sha256);
 
-    /// Bulk-import from a plain-text hash file in the format used by
-    /// data/malware_hashes.txt:  "<sha256>  <family / description>"
-    /// Returns the number of new rows inserted.
-    int importFromTextFile(const QString& path, const QString& source);
+  /// Bulk-import from a plain-text hash file in the format used by
+  /// data/malware_hashes.txt:  "<sha256>  <family / description>"
+  /// Returns the number of new rows inserted.
+  int importFromTextFile(const QString& path, const QString& source);
 
-    /// Remove all rows that were auto-upserted by the AI scanner (source='AI/local').
-    /// These entries are unreliable — they represent files the ML model was uncertain
-    /// about on a previous scan, not confirmed malware. Call once at startup to
-    /// clear a poisoned database, and after changing AI thresholds.
-    /// Returns the number of rows deleted.
-    int pruneAIUpserted();
+  /// Remove all rows that were auto-upserted by the AI scanner (source='AI/local').
+  /// These entries are unreliable — they represent files the ML model was uncertain
+  /// about on a previous scan, not confirmed malware. Call once at startup to
+  /// clear a poisoned database, and after changing AI thresholds.
+  /// Returns the number of rows deleted.
+  int pruneAIUpserted();
 
-private:
-    bool createSchema();
-    bool seedFromBlocklist(const QString& path);
+ private:
+  bool createSchema();
+  bool seedFromBlocklist(const QString& path);
 
-    sqlite3*      m_db = nullptr;
-    QString       m_dbPath;
-    mutable QMutex m_mutex;     // serializes writes; reads also locked since
-                                // we're using a single connection
+  sqlite3* m_db = nullptr;
+  QString m_dbPath;
+  mutable QMutex m_mutex;  // serializes writes; reads also locked since
+                           // we're using a single connection
 };

@@ -30,17 +30,16 @@
 namespace CodeSigning {
 
 enum class Status {
-    Unknown        = -1,   // we couldn't determine — treat as no signal
-    Unsigned       =  0,
-    SignedUntrusted = 1,   // signed, but not by an Apple-trusted authority
-    SignedTrusted   = 2,   // signed by a recognized authority
+  Unknown = -1,         // we couldn't determine — treat as no signal
+  Unsigned = 0,
+  SignedUntrusted = 1,  // signed, but not by an Apple-trusted authority
+  SignedTrusted = 2,    // signed by a recognized authority
 };
 
-struct Result
-{
-    Status   status   = Status::Unknown;
-    QString  signerId;       // Apple Authority / TeamID / dpkg package name
-    QString  rawDetails;     // first ~512 chars of underlying tool output
+struct Result {
+  Status status = Status::Unknown;
+  QString signerId;    // Apple Authority / TeamID / dpkg package name
+  QString rawDetails;  // first ~512 chars of underlying tool output
 };
 
 /// Verify the signature of a single file. Synchronous; typical cost is
@@ -50,13 +49,17 @@ Result verifyFile(const QString& filePath);
 
 /// Convenience: convert a Status to a small int that ReputationDB stores
 /// (matches ReputationRecord::signingStatus convention).
-inline int statusToInt(Status s) { return static_cast<int>(s); }
-inline Status statusFromInt(int v)
-{
-    if (v == 2) return Status::SignedTrusted;
-    if (v == 1) return Status::SignedUntrusted;
-    if (v == 0) return Status::Unsigned;
-    return Status::Unknown;
+inline int statusToInt(Status s) {
+  return static_cast<int>(s);
+}
+inline Status statusFromInt(int v) {
+  if (v == 2)
+    return Status::SignedTrusted;
+  if (v == 1)
+    return Status::SignedUntrusted;
+  if (v == 0)
+    return Status::Unsigned;
+  return Status::Unknown;
 }
 
 QString statusToText(Status s);

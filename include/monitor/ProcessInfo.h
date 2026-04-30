@@ -7,11 +7,11 @@
 // these are safe to copy across threads via Qt::QueuedConnection.
 // ============================================================================
 
+#include <QDateTime>
+#include <QMetaType>
 #include <QString>
 #include <QStringList>
-#include <QDateTime>
 #include <QVector>
-#include <QMetaType>
 
 // Phase 3: rootkit findings travel inside SystemSnapshot
 #include "rootkit/RootkitTypes.h"
@@ -31,30 +31,28 @@
 //   isOurProcess                   true if pid == getpid() — used to suppress
 //                                   self-flagging in the heuristics pass
 // ---------------------------------------------------------------------------
-struct ProcessInfo
-{
-    int         pid          = 0;
-    int         ppid         = 0;
-    int         uid          = -1;
-    QString     name;          // short name (truncated to 16 chars on macOS)
-    QString     user;          // resolved username, falls back to "uid:<n>"
-    QString     exePath;
-    QString     cmdLine;
-    bool        exeMissing   = false;
-    bool        isOurProcess = false;
+struct ProcessInfo {
+  int pid = 0;
+  int ppid = 0;
+  int uid = -1;
+  QString name;  // short name (truncated to 16 chars on macOS)
+  QString user;  // resolved username, falls back to "uid:<n>"
+  QString exePath;
+  QString cmdLine;
+  bool exeMissing = false;
+  bool isOurProcess = false;
 };
 
 // ---------------------------------------------------------------------------
 // SuspiciousProcess  –  a ProcessInfo that one or more heuristics flagged
 // ---------------------------------------------------------------------------
-struct SuspiciousProcess
-{
-    ProcessInfo  info;
-    QStringList  reasons;          // human-readable why flagged
-    QString      severity;         // "low" / "medium" / "high"
-    int          score    = 0;     // 0–100; sum of triggered heuristic weights
-    int          signingStatus = -1;  // CodeSigning::Status as int (-1 if not checked)
-    QString      signerId;
+struct SuspiciousProcess {
+  ProcessInfo info;
+  QStringList reasons;     // human-readable why flagged
+  QString severity;        // "low" / "medium" / "high"
+  int score = 0;           // 0–100; sum of triggered heuristic weights
+  int signingStatus = -1;  // CodeSigning::Status as int (-1 if not checked)
+  QString signerId;
 };
 
 // ---------------------------------------------------------------------------
@@ -68,38 +66,36 @@ struct SuspiciousProcess
 //   "SystemdUnit"        – /etc/systemd/system/*.service (Linux only)
 //   "SystemdUserUnit"    – ~/.config/systemd/user/*.service (Linux only)
 // ---------------------------------------------------------------------------
-struct PersistenceItem
-{
-    QString     type;
-    QString     label;             // launchd Label, cron schedule, unit name, ...
-    QString     filePath;          // where on disk it lives (empty for crontab -l output)
-    QString     program;           // executable that gets run
-    QStringList programArgs;       // full argv if available
-    bool        runAtLoad   = false;  // launchd RunAtLoad
-    bool        keepAlive   = false;  // launchd KeepAlive
-    QString     scheduleHint;      // human-readable schedule (cron line, "at boot", etc.)
-    QStringList notes;             // anything we noticed (unsigned target, /tmp path, ...)
-    QString     severity;          // "low" / "medium" / "high"
-    QDateTime   lastModified;
+struct PersistenceItem {
+  QString type;
+  QString label;            // launchd Label, cron schedule, unit name, ...
+  QString filePath;         // where on disk it lives (empty for crontab -l output)
+  QString program;          // executable that gets run
+  QStringList programArgs;  // full argv if available
+  bool runAtLoad = false;   // launchd RunAtLoad
+  bool keepAlive = false;   // launchd KeepAlive
+  QString scheduleHint;     // human-readable schedule (cron line, "at boot", etc.)
+  QStringList notes;        // anything we noticed (unsigned target, /tmp path, ...)
+  QString severity;         // "low" / "medium" / "high"
+  QDateTime lastModified;
 };
 
 // ---------------------------------------------------------------------------
 // SystemSnapshot  –  one full system-monitor pass
 // ---------------------------------------------------------------------------
-struct SystemSnapshot
-{
-    QDateTime                   capturedAt;
-    int                         totalProcesses = 0;
-    QVector<ProcessInfo>        processes;
-    QVector<SuspiciousProcess>  suspicious;
-    QVector<PersistenceItem>    persistence;
+struct SystemSnapshot {
+  QDateTime capturedAt;
+  int totalProcesses = 0;
+  QVector<ProcessInfo> processes;
+  QVector<SuspiciousProcess> suspicious;
+  QVector<PersistenceItem> persistence;
 
-    // Diagnostics so the UI can show "we couldn't read N command lines"
-    int                         restrictedCmdlines = 0;
-    QString                     platformLabel;       // "macOS", "Linux", "unknown"
+  // Diagnostics so the UI can show "we couldn't read N command lines"
+  int restrictedCmdlines = 0;
+  QString platformLabel;  // "macOS", "Linux", "unknown"
 
-    // Phase 3 — rootkit-awareness findings (defaults to ran=false if disabled)
-    RootkitSnapshot             rootkit;
+  // Phase 3 — rootkit-awareness findings (defaults to ran=false if disabled)
+  RootkitSnapshot rootkit;
 };
 
 // Required for queued signals across thread boundaries.

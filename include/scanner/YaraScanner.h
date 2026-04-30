@@ -25,46 +25,43 @@
 //   • scanFile() is safe to call concurrently from N threads after init.
 // ============================================================================
 
+#include <QHash>
 #include <QString>
 #include <QStringList>
 #include <QVector>
-#include <QHash>
 
 // ---------------------------------------------------------------------------
 // YaraMatch  –  one rule that fired on a file
 // ---------------------------------------------------------------------------
-struct YaraMatch
-{
-    QString     ruleName;        // "Generic_Suspicious_PE", "EICAR_Test_File", ...
-    QString     ruleNamespace;   // optional grouping ("malware", "packer", ...)
-    QString     family;          // metadata: family= "Emotet", "WannaCry", ...
-    QString     description;     // metadata: description= "..."
-    QString     severity;        // metadata: severity= "low/medium/high/critical"
-    QStringList tags;            // YARA rule tags (banker, ransomware, ...)
+struct YaraMatch {
+  QString ruleName;       // "Generic_Suspicious_PE", "EICAR_Test_File", ...
+  QString ruleNamespace;  // optional grouping ("malware", "packer", ...)
+  QString family;         // metadata: family= "Emotet", "WannaCry", ...
+  QString description;    // metadata: description= "..."
+  QString severity;       // metadata: severity= "low/medium/high/critical"
+  QStringList tags;       // YARA rule tags (banker, ransomware, ...)
 };
 
 // ---------------------------------------------------------------------------
 // YaraScanResult  –  full result of one file scan
 // ---------------------------------------------------------------------------
-struct YaraScanResult
-{
-    bool                hadError    = false;   // true if libyara returned an error
-    QString             errorString;            // populated when hadError
-    QVector<YaraMatch>  matches;                // empty when no rules fired
+struct YaraScanResult {
+  bool hadError = false;       // true if libyara returned an error
+  QString errorString;         // populated when hadError
+  QVector<YaraMatch> matches;  // empty when no rules fired
 
-    bool fired() const { return !matches.isEmpty(); }
+  bool fired() const { return !matches.isEmpty(); }
 };
 
 // ---------------------------------------------------------------------------
 // YaraInitOptions  –  parameters for YaraScanner::initialize()
 // ---------------------------------------------------------------------------
-struct YaraInitOptions
-{
-    QString rulesDir;                  // absolute path to data/yara_rules
-    bool    includeExperimental = false; // compile rules under <rulesDir>/experimental/
-    QString experimentalSubdir = "experimental";
-    int     maxCompileErrors  = 100;   // stop loading after this many errors
-    bool    verbose            = false;// log per-file compile detail
+struct YaraInitOptions {
+  QString rulesDir;                  // absolute path to data/yara_rules
+  bool includeExperimental = false;  // compile rules under <rulesDir>/experimental/
+  QString experimentalSubdir = "experimental";
+  int maxCompileErrors = 100;        // stop loading after this many errors
+  bool verbose = false;              // log per-file compile detail
 };
 
 // ---------------------------------------------------------------------------
@@ -91,7 +88,7 @@ bool initialize(const QString& rulesDir);
 bool isAvailable();
 
 /// Number of compiled rules currently loaded (0 if not initialized).
-int  ruleCount();
+int ruleCount();
 
 /// Scan a single file against all loaded rules.
 ///

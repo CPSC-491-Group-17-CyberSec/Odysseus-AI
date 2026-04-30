@@ -21,11 +21,11 @@
 #ifndef ODYSSEUS_UI_RESPONSE_PANEL_H
 #define ODYSSEUS_UI_RESPONSE_PANEL_H
 
-#include "response/ResponseManager.h"
-#include "response/ResponseTypes.h"
-
 #include <string>
 #include <vector>
+
+#include "response/ResponseManager.h"
+#include "response/ResponseTypes.h"
 
 namespace odysseus::ui {
 
@@ -34,11 +34,11 @@ using response::ActionType;
 
 // Per-button descriptor returned to the UI to render an action panel.
 struct ActionButton {
-    ActionType  action;
-    std::string label;        // user-visible text
-    std::string tooltip;      // shown on hover; explains "why disabled" too
-    bool        enabled;
-    bool        destructive;  // UI should style differently and ask to confirm
+  ActionType action;
+  std::string label;    // user-visible text
+  std::string tooltip;  // shown on hover; explains "why disabled" too
+  bool enabled;
+  bool destructive;     // UI should style differently and ask to confirm
 };
 
 // Builds the canonical button list for an alert detail panel. The order is
@@ -55,10 +55,10 @@ std::vector<ActionButton> buildSystemStatusActions(
 // User-facing confirmation prompts. Use these strings in the modal dialogs;
 // they're written once here so wording stays consistent across the app.
 struct ConfirmPrompt {
-    std::string title;
-    std::string body;
-    std::string confirmLabel;
-    std::string cancelLabel;
+  std::string title;
+  std::string body;
+  std::string confirmLabel;
+  std::string cancelLabel;
 };
 ConfirmPrompt confirmPromptFor(ActionType action, const ActionTarget& t);
 

@@ -22,13 +22,13 @@
 // Safe to call from the UI thread; small / fast (set-ops on QVectors).
 // ============================================================================
 
-#include "AlertTypes.h"
-#include "../monitor/ProcessInfo.h"   // SystemSnapshot
-#include "../core/ScannerConfig.h"
-
-#include <QVector>
-#include <QSet>
 #include <QHash>
+#include <QSet>
+#include <QVector>
+
+#include "../core/ScannerConfig.h"
+#include "../monitor/ProcessInfo.h"  // SystemSnapshot
+#include "AlertTypes.h"
 
 namespace SnapshotDiff {
 
@@ -42,15 +42,13 @@ namespace SnapshotDiff {
 ///                 conditions and (b) detect resolution (active keys
 ///                 that are NOT in this set).
 struct DiffResult {
-    QVector<EDR::Alert>          newAlerts;
-    QHash<QString, EDR::Alert>   currentKeys;
+  QVector<EDR::Alert> newAlerts;
+  QHash<QString, EDR::Alert> currentKeys;
 };
 
 /// Compute alerts for everything new in `curr` vs `prev`, plus the full
 /// keyed set of conditions present in `curr`. Honors the per-category
 /// toggles in `cfg`. Pure function: no I/O, no event loop interaction.
-DiffResult diff(const SystemSnapshot& prev,
-                const SystemSnapshot& curr,
-                const ScannerConfig&  cfg);
+DiffResult diff(const SystemSnapshot& prev, const SystemSnapshot& curr, const ScannerConfig& cfg);
 
 }  // namespace SnapshotDiff

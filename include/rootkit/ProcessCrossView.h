@@ -26,8 +26,8 @@
 //   a "not applicable on this platform" note.
 // ============================================================================
 
-#include "rootkit/RootkitTypes.h"
 #include "monitor/ProcessInfo.h"
+#include "rootkit/RootkitTypes.h"
 
 namespace ProcessCrossView {
 
@@ -38,9 +38,10 @@ namespace ProcessCrossView {
 /// out      — appended findings (PIDs that disagreed)
 /// Returns true if the comparison ran successfully; false if `ps` was
 /// unreachable or returned nothing parseable.
-bool diff(const QVector<ProcessInfo>& existing,
-          QVector<CrossViewFinding>&   out,
-          int& sysctlCountOut,
-          int& psCountOut);
+bool diff(
+    const QVector<ProcessInfo>& existing,
+    QVector<CrossViewFinding>& out,
+    int& sysctlCountOut,
+    int& psCountOut);
 
 }  // namespace ProcessCrossView

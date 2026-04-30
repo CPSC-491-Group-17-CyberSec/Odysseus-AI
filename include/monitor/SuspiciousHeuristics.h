@@ -32,8 +32,7 @@ namespace SuspiciousHeuristics {
 /// checkSigning    – when true, runs CodeSigning::verifyFile() per flagged
 ///                    process (slow: 30–80 ms each on macOS). Set false on
 ///                    fast refresh; enable for the on-demand "deep check".
-QVector<SuspiciousProcess> evaluate(const QVector<ProcessInfo>& processes,
-                                     bool checkSigning);
+QVector<SuspiciousProcess> evaluate(const QVector<ProcessInfo>& processes, bool checkSigning);
 
 /// Test-only helpers exposed for the suspicious-process detail panel —
 /// these run a single rule and return the reason string if it would have

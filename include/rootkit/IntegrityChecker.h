@@ -22,9 +22,9 @@
 //   way the user wants to know.
 // ============================================================================
 
-#include "rootkit/RootkitTypes.h"
-
 #include <QString>
+
+#include "rootkit/RootkitTypes.h"
 
 namespace IntegrityChecker {
 
@@ -39,12 +39,13 @@ namespace IntegrityChecker {
 ///                        was just created
 /// baselineRebasedOut  – out: true if the baseline was silently rebased due
 ///                        to an OS-version change
-bool verify(QVector<IntegrityFinding>& out,
-            int& checkedOut,
-            int& mismatchOut,
-            bool& baselineCreatedOut,
-            bool& baselineRebasedOut,
-            QString& macosVersionOut);
+bool verify(
+    QVector<IntegrityFinding>& out,
+    int& checkedOut,
+    int& mismatchOut,
+    bool& baselineCreatedOut,
+    bool& baselineRebasedOut,
+    QString& macosVersionOut);
 
 /// Force-rebase: discard the existing baseline and hash everything fresh.
 /// Useful as a manual "I just installed an update, trust the new hashes"
