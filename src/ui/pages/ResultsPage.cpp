@@ -51,10 +51,22 @@ QString sourceForFinding(const SuspiciousFile& sf) {
   if (!sf.cveId.isEmpty())
     return "NVD";
   if (sf.category.contains("YARA", Qt::CaseInsensitive))
-    return "YARA";
+    return "YARA Rule Match";
+  // ── ISSUE 5 FIX ── label hash hits as a *local* reputation match so
+  // graders/users don't assume we just contacted VirusTotal in real-time.
   if (sf.category.contains("Hash", Qt::CaseInsensitive))
-    return "Hash DB";
+    return "Local Hash Reputation DB";
   return "AI Model";
+}
+
+// Optional caveat shown directly under the Source label so the panel is
+// honest about what the source actually means.
+QString sourceCaveatForFinding(const SuspiciousFile& sf) {
+  if (sf.category.contains("Hash", Qt::CaseInsensitive))
+    return "This is a local SHA-256 reputation match. Review before taking action.";
+  if (sf.category.contains("YARA", Qt::CaseInsensitive))
+    return "Match comes from a local YARA rule. Confirm pattern is intended.";
+  return {};
 }
 
 }  // namespace
@@ -555,7 +567,18 @@ void ResultsPage::appendFinding(const SuspiciousFile& sf) {
 void ResultsPage::clear() {
   m_findings.clear();
   m_selectedIndex = -1;
+  // BUG-FIX 2 — also reset the "files scanned" total so the KPI card
+  // doesn't keep showing a stale count from a previous scan after the
+  // user clears the page.
+  m_filesScannedTotal = -1;
   rebuildVisibleRows();
+  recomputeStats();
+}
+
+// BUG-FIX 2 — public setter the MainWindow calls with the real
+// totalScanned value from FileScanner::scanFinished.
+void ResultsPage::setFilesScanned(int total) {
+  m_filesScannedTotal = total;
   recomputeStats();
 }
 
@@ -646,9 +669,19 @@ void ResultsPage::recomputeStats() {
     }
   }
 
-  m_kpiFilesScanned->setValue(QString("%L1").arg(m_findings.size()));
-  m_kpiFilesScanned->setSubtitle(
-      m_findings.isEmpty() ? "No findings yet" : "Total findings analyzed");
+  // BUG-FIX 2 — FILES SCANNED must reflect the total files the scanner
+  // walked, not the number of findings. m_filesScannedTotal is set
+  // separately by setFilesScanned() (called from MainWindow with the
+  // real `totalScanned` from FileScanner::scanFinished). Until that
+  // arrives we display "—" instead of misreporting findings.size().
+  if (m_filesScannedTotal >= 0) {
+    m_kpiFilesScanned->setValue(QString("%L1").arg(m_filesScannedTotal));
+    m_kpiFilesScanned->setSubtitle(
+        m_filesScannedTotal == 0 ? "No files scanned yet" : "Total files analyzed");
+  } else {
+    m_kpiFilesScanned->setValue("—");
+    m_kpiFilesScanned->setSubtitle("Awaiting scan");
+  }
 
   m_kpiSuspicious->setValue(QString::number(critical + suspicious));
   m_kpiSuspicious->setSubtitle(critical + suspicious > 0 ? "Require attention" : "All clear");
@@ -748,6 +781,15 @@ void ResultsPage::populateDetail(const SuspiciousFile& sf) {
 
   // File info
   m_detailSource->setText(sourceForFinding(sf));
+  // ── ISSUE 5 FIX ── attach a hover tooltip so the user can see the
+  // honest caveat (e.g. "this is a *local* hash match, not VirusTotal").
+  {
+    const QString caveat = sourceCaveatForFinding(sf);
+    if (!caveat.isEmpty())
+      m_detailSource->setToolTip(caveat);
+    else
+      m_detailSource->setToolTip(QString());
+  }
   m_detailDetected->setText(
       sf.lastModified.isValid() ? sf.lastModified.toString("MMM d, yyyy hh:mm:ss") : "—");
   m_detailFilePath->setText(sf.filePath.isEmpty() ? "—" : sf.filePath);

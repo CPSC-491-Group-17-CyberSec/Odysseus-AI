@@ -417,13 +417,26 @@ void AlertsPage::rebuildList() {
       m_emptyState->setVisible(true);
       m_loadingState->setVisible(false);
     } else if (m_edrRunning) {
-      m_emptyState->setText("No alerts so far. Your system looks good.");
+      // ── ITEM 4 — clarify alert source ──
+      // Demo viewers were confused when the Dashboard showed
+      // "Critical threats detected" (from file scans) while this page
+      // read 0 alerts. The text now spells out the source split.
+      m_emptyState->setText(
+          "No alerts so far. Your system looks good.\n\n"
+          "Note: Alerts on this page come from real-time monitoring "
+          "(EDR-Lite) — process / persistence / integrity / kernel-"
+          "extension changes. They are NOT file-scan results. To see "
+          "scanned-file findings, switch to the Results page.");
       m_emptyState->setVisible(true);
       m_loadingState->setVisible(false);
     } else {
+      // EDR off → re-emphasise that file-scan findings live on the
+      // Results page, not here, so the user doesn't expect them.
       m_emptyState->setText(
           "No alerts yet. Enable EDR-Lite Monitoring (Beta) in "
-          "Settings to start watching for system changes.");
+          "Settings to start watching for system changes.\n\n"
+          "Note: Alerts on this page come from real-time monitoring "
+          "only — file-scan findings appear on the Results page.");
       m_emptyState->setVisible(true);
       m_loadingState->setVisible(false);
     }

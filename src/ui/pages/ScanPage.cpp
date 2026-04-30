@@ -257,6 +257,17 @@ void ScanPage::buildUi() {
               Theme::Color::accentBlue));
   stripLayout->addWidget(m_progressBar);
 
+  // ── ISSUE 6 FIX ── final scan-summary line. Hidden during scanning,
+  // shown when scanning ends with a one-line readout of the latest
+  // ScanRecord (files / findings / Critical / review / duration).
+  m_progressSummary = new QLabel("", m_progressStrip);
+  m_progressSummary->setStyleSheet(QString(
+      "QLabel { color: %1; font-size: 12px; padding-top: 6px; background: transparent; }")
+      .arg(Theme::Color::textSecondary));
+  m_progressSummary->setVisible(false);
+  m_progressSummary->setWordWrap(true);
+  stripLayout->addWidget(m_progressSummary);
+
   // Hidden by default (only shown once a scan starts).
   m_progressStrip->setVisible(false);
 
@@ -879,6 +890,30 @@ void ScanPage::setStats(
 void ScanPage::setRecentScans(const QVector<ScanRecord>& history) {
   m_history = history;
   rebuildRecentScans();
+
+  // ── ISSUE 6 FIX ── refresh the post-scan summary if the strip is
+  // currently in the "Scan Complete" terminal state. setScanning(false)
+  // is called *before* the ScanRecord lands in history (the DB write
+  // is async), so the summary line is initially empty. As soon as the
+  // record arrives, repopulate the summary so the user gets the full
+  // readout without having to start another scan.
+  if (m_progressSummary && m_progressSummary->isVisible() && !m_history.isEmpty()) {
+    const ScanRecord& latest = m_history.first();
+    const int findings =
+        latest.criticalCount + latest.suspiciousOnly + latest.reviewCount;
+    const int mins = latest.elapsedSeconds / 60;
+    const int secs = latest.elapsedSeconds % 60;
+    const QString durationStr = mins > 0
+        ? QString("%1m %2s").arg(mins).arg(secs)
+        : QString("%1s").arg(secs);
+    m_progressSummary->setText(
+        QString("Last scan: %L1 files • %2 findings (%3 critical, %4 review) • %5")
+            .arg(latest.totalScanned)
+            .arg(findings)
+            .arg(latest.criticalCount)
+            .arg(latest.reviewCount)
+            .arg(durationStr));
+  }
 }
 
 void ScanPage::setScanning(bool scanning) {
@@ -903,6 +938,11 @@ void ScanPage::setScanning(bool scanning) {
     if (m_progressPct)   { m_progressPct->setText("0%"); }
     if (m_progressPhase) { m_progressPhase->setText("Scanning…"); }
     if (m_elapsedLabel)  { m_elapsedLabel->setText("Elapsed: 00:00"); }
+    if (m_progressSummary) {
+      // ISSUE 6 — hide stale summary when a new scan begins.
+      m_progressSummary->setVisible(false);
+      m_progressSummary->clear();
+    }
     if (m_elapsedTimer && !m_elapsedTimer->isActive())
       m_elapsedTimer->start();
   } else {
@@ -913,6 +953,34 @@ void ScanPage::setScanning(bool scanning) {
     if (m_progressBar)   { m_progressBar->setValue(100); }
     if (m_progressPct)   { m_progressPct->setText("100%"); }
     if (m_progressPhase) { m_progressPhase->setText("Scan Complete"); }
+
+    // ── ISSUE 6 FIX ── populate the summary line from the most recent
+    // history record so the user can read the scan outcome without
+    // switching tabs. Falls back to a neutral message if history hasn't
+    // landed yet (the DB write is async; setRecentScans() catches up).
+    if (m_progressSummary) {
+      if (!m_history.isEmpty()) {
+        const ScanRecord& latest = m_history.first();
+        const int findings =
+            latest.criticalCount + latest.suspiciousOnly + latest.reviewCount;
+        const int mins = latest.elapsedSeconds / 60;
+        const int secs = latest.elapsedSeconds % 60;
+        const QString durationStr = mins > 0
+            ? QString("%1m %2s").arg(mins).arg(secs)
+            : QString("%1s").arg(secs);
+        m_progressSummary->setText(
+            QString("Last scan: %L1 files • %2 findings (%3 critical, %4 review) • %5")
+                .arg(latest.totalScanned)
+                .arg(findings)
+                .arg(latest.criticalCount)
+                .arg(latest.reviewCount)
+                .arg(durationStr));
+        m_progressSummary->setVisible(true);
+      } else {
+        m_progressSummary->setText("Scan complete — see Results tab for details.");
+        m_progressSummary->setVisible(true);
+      }
+    }
   }
 }
 

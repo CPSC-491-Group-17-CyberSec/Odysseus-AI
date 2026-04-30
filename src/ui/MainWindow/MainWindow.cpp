@@ -473,7 +473,12 @@ void MainWindow::setupShell() {
     m_dashboardPage->setEdrStatus(
         m_monitor && m_monitor->isRunning(),
         m_monitor ? m_monitor->lastTickAt() : QDateTime{},
-        m_monitor ? m_monitor->alertCount() : 0);
+        m_monitor ? m_monitor->activeAlertCount() : 0   /* BUG-FIX 5 — match AlertsPage */);
+  // ── ISSUE 1 FIX ── prime the Real-Time Protection score on startup
+  // so the gauge reads 100 / Secure (no active alerts) instead of the
+  // constructor's default. Idempotent — same call fires later from
+  // every EDR signal.
+  refreshDashboardScore();
 }
 
 // ============================================================================
@@ -858,9 +863,17 @@ void MainWindow::onEdrAlertRaised(const EDR::Alert& alert) {
 }
 
 void MainWindow::refreshDashboardScore() {
-  if (!m_dashboardPage || !m_monitor)
+  // ── ISSUE 1 FIX ── compute against an empty alert map when EDR is
+  // off or unavailable. The previous early-return left the gauge at
+  // its constructor default (which was 0 / Critical), producing the
+  // contradiction "0 active alerts but score 0/100 Critical". With an
+  // empty input, scoreActiveAlerts returns 100 / Secure, which is the
+  // honest representation of "no active EDR-Lite findings".
+  if (!m_dashboardPage)
     return;
-  const EDR::ScoreReport report = EDR::scoreActiveAlerts(m_monitor->activeAlerts());
+  const QHash<QString, EDR::Alert> active =
+      m_monitor ? m_monitor->activeAlerts() : QHash<QString, EDR::Alert>{};
+  const EDR::ScoreReport report = EDR::scoreActiveAlerts(active);
   m_dashboardPage->setSecurityReport(report);
 }
 
@@ -869,7 +882,8 @@ void MainWindow::onEdrTickCompleted(int alertsThisTick, int /*durationMs*/) {
   // time reads correctly. Alert count is sourced from MonitoringService.
   if (m_dashboardPage && m_monitor) {
     m_dashboardPage->setEdrStatus(
-        m_monitor->isRunning(), m_monitor->lastTickAt(), m_monitor->alertCount());
+        m_monitor->isRunning(), m_monitor->lastTickAt(),
+        m_monitor->activeAlertCount());   // BUG-FIX 5 — match AlertsPage
   }
   // Forward to the Alerts page timeline strip.
   if (m_alertsPage && m_monitor) {
@@ -882,7 +896,9 @@ void MainWindow::onEdrTickCompleted(int alertsThisTick, int /*durationMs*/) {
 
 void MainWindow::onEdrStateChanged(bool enabled) {
   if (m_dashboardPage && m_monitor) {
-    m_dashboardPage->setEdrStatus(enabled, m_monitor->lastTickAt(), m_monitor->alertCount());
+    m_dashboardPage->setEdrStatus(
+        enabled, m_monitor->lastTickAt(),
+        m_monitor->activeAlertCount());   // BUG-FIX 5 — match AlertsPage
   }
   if (m_alertsPage) {
     m_alertsPage->setEdrRunning(enabled);
@@ -2652,6 +2668,24 @@ void MainWindow::onScanFinished(
   // Dashboard is updated again after the ScanRecord lands in m_history
   // (at the end of this function).
 
+  // ── BUG-FIX 1 — make the terminal state visible immediately ──
+  // The ScanPage progress strip used to depend solely on the late
+  // m_scanPage->setStats(scanning=false) call near the end of this
+  // function. Any code path that took longer (CVE lookups, DB writes)
+  // could leave the user staring at "Scanning…" with the bar at ~90 %.
+  // Pin progress to 100 % and flip the strip out of in-progress mode
+  // FIRST, so the UI is honest from the moment scanFinished arrives.
+  if (m_scanPage) {
+    m_scanPage->setProgress(100);
+    m_scanPage->setScanning(false);
+  }
+  qInfo().noquote()
+      << QString("[Scan] complete — totalScanned=%1 findings=%2 "
+                 "elapsed=%3s progress=100%%")
+             .arg(totalScanned)
+             .arg(m_findings.size())
+             .arg(elapsedSeconds);
+
   runScanButton->setText("Run Scan");
   runScanButton->setStyleSheet(
       "QPushButton { background-color: #1A1AEE; color: white; border-radius: 15px;"
@@ -2826,8 +2860,12 @@ void MainWindow::onScanFinished(
 
   // Push the finalized finding set into the refactored ResultsPage so
   // its KPI strip shows the post-scan totals + average score.
-  if (m_resultsPage)
+  if (m_resultsPage) {
     m_resultsPage->setFindings(m_findings);
+    // BUG-FIX 2 — feed the real total-files-walked count so the
+    // FILES SCANNED KPI shows e.g. 102,431 instead of m_findings.size().
+    m_resultsPage->setFilesScanned(totalScanned);
+  }
 
   // Update the new ScanPage's KPI strip + Recent Scans list.
   if (m_scanPage) {

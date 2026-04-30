@@ -38,6 +38,84 @@
 extern ReputationDB* odysseus_getReputationDB();
 
 // ============================================================================
+// Developer / tooling path classifier (file-scan companion to the
+// process-level dev-tool classifier in SuspiciousHeuristics.cpp).
+//
+// When a finding is flagged ONLY by AI/YARA (no hash hit) AND its path
+// lives under a known dev/tooling directory — e.g. ~/Library/Application
+// Support, ~/Library/Developer, ~/.cache, node_modules, __pycache__,
+// site-packages — we downgrade the verdict to NEEDS_REVIEW and stamp a
+// reason tag. This kills the GitKraken / Minecraft / Claude-session-jsonl
+// false-positive class without globally trusting those locations: a hash
+// match in one of these directories still surfaces as Critical.
+//
+// Returns the human-readable label of the matched dev-tool path, or an
+// empty string when the path is NOT in a recognised dev/tooling dir.
+// ============================================================================
+static QString devToolPathLabel(const QString& path)
+{
+    // Lowercase for case-insensitive comparisons (macOS HFS+ + APFS are
+    // case-insensitive by default, NTFS is too). Also normalise the path
+    // separator so the same fragments work on Windows-style backslashes.
+    QString lp = path.toLower();
+    lp.replace('\\', '/');
+
+    // Order: most specific first.
+    struct Rule { const char* fragment; const char* label; };
+    static const Rule kRules[] = {
+        // macOS application support / developer caches.
+        {"/library/application support/",     "macOS Application Support"},
+        {"/library/developer/",                "Xcode / Developer"},
+        {"/library/caches/",                   "macOS user caches"},
+        {"/.cache/",                           "User cache (~/.cache)"},
+
+        // Language toolchains + package managers.
+        {"/node_modules/",                     "Node.js (node_modules)"},
+        {"/site-packages/",                    "Python (site-packages)"},
+        {"/__pycache__/",                       "Python (__pycache__)"},
+        {"/.cargo/",                           "Rust (cargo)"},
+        {"/.rustup/",                          "Rust (rustup)"},
+        {"/.npm/",                             "npm cache"},
+        {"/.npm-global/",                      "npm (global)"},
+        {"/.yarn/",                            "Yarn"},
+        {"/.pnpm/",                            "pnpm"},
+        {"/.deno/",                            "Deno"},
+        {"/.bun/",                             "Bun"},
+        {"/.nvm/",                             "Node (nvm)"},
+        {"/.pyenv/",                           "Python (pyenv)"},
+        {"/.poetry/",                          "Python (poetry)"},
+        {"/.gradle/",                          "Gradle"},
+        {"/.m2/",                              "Maven"},
+        {"/.dotnet/",                          ".NET"},
+        {"/.nuget/",                           ".NET (NuGet)"},
+        {"/.go/",                              "Go"},
+        {"/.gopath/",                          "Go (GOPATH)"},
+
+        // Editor / IDE caches (macOS layouts).
+        {"/.vscode/",                          "VS Code"},
+        {"/.vscode-server/",                   "VS Code (remote)"},
+        {"/.cursor/",                          "Cursor"},
+        {"/.cursor-server/",                   "Cursor (remote)"},
+        {"/.windsurf/",                        "Windsurf"},
+        {"/.atom/",                            "Atom"},
+
+        // Homebrew + Xcode toolchains (already path-skipped at enumeration
+        // for most users, but a partial scan into /opt or /usr can still
+        // reach them — keep the rule for completeness).
+        {"/cellar/",                           "Homebrew (Cellar)"},
+        {"/homebrew/",                         "Homebrew"},
+        {"/xcode.app/",                        "Xcode"},
+        {"/deriveddata/",                      "Xcode (DerivedData)"},
+    };
+
+    for (const Rule& r : kRules) {
+        if (lp.contains(QLatin1String(r.fragment)))
+            return QString::fromLatin1(r.label);
+    }
+    return {};
+}
+
+// ============================================================================
 // loadHashDatabase  –  static, called once at worker construction.
 //
 // Phase 1: prefer the structured ReputationDB. The flat-text file remains
@@ -295,21 +373,122 @@ void FileScannerWorker::runHashWorker() {
       sf.sha256 = sha256;  // already computed by checkByHash
       sf.classificationLevel = "Critical";
       sf.severityLevel = "CRITICAL";
-      sf.confidencePct = 100.0f;  // hash hit = exact match
+      // ── ITEM 2 — confidence normalisation ──
+      // Hash matches are exact, but 1.000 reads as model-output and
+      // implies an AI confidence claim we don't own. The reputation
+      // DB itself can have stale or low-quality entries, so 0.95 is
+      // the high-water mark even for hash hits. Strong heuristics top
+      // out lower (see AI confidencePct mapping below).
+      sf.confidencePct = 95.0f;
+
+      // ── BUG-FIX 4 — deterministic explanation for hash matches ──
+      // The detail panel must never show blank "Why was this flagged?"
+      // / AI Summary / Indicators / Recommended Actions. The LLM is
+      // optional and intentionally not invoked for hash hits (no
+      // probabilistic analysis is needed for an exact match), so we
+      // populate canned text here instead of leaving the fields empty.
+      sf.aiSummary =
+          "This file's SHA-256 hash matches a known malware sample in "
+          "the local reputation database. Hash matches are exact and "
+          "high-confidence — no further AI analysis is required.";
+      sf.keyIndicators = QStringList{
+          QStringLiteral("Exact SHA-256 match against the malware database"),
+          QStringLiteral("Match source: local hash blocklist / reputation DB"),
+          reason  // includes the family name + truncated hex
+      };
+      sf.recommendedActions = QStringList{
+          QStringLiteral("Quarantine the file immediately and prevent execution"),
+          QStringLiteral("Submit the file hash to VirusTotal for multi-engine verification"),
+          QStringLiteral("Review system logs for signs of prior execution"),
+          QStringLiteral("Scan connected systems for lateral-movement indicators")
+      };
     }
     // --- Detection pass 2: YARA rule matching ---
     else if (checkByYara(item.filePath, item.fileSize, reason, category, &sf)) {
       flagged = true;
-      // YARA pass already filled classificationLevel + confidencePct.
+      // YARA pass already filled classificationLevel + confidencePct,
+      // but the aiSummary / indicators / actions are typically empty
+      // (YARA itself doesn't generate prose). Provide a deterministic
+      // fallback so the detail panel is consistent across all sources.
+      // BUG-FIX 4.
+      if (sf.aiSummary.isEmpty()) {
+        sf.aiSummary =
+            "One or more YARA rules consistent with malicious behavior "
+            "fired on this file. YARA rule matches are author-curated "
+            "pattern matches against known threat indicators — review "
+            "the listed rule names below for the specific signal.";
+      }
+      if (sf.keyIndicators.isEmpty()) {
+        QStringList ind;
+        ind << QStringLiteral("YARA rule(s) fired during third-pass scan");
+        if (!sf.yaraFamily.isEmpty())
+          ind << QString("Family attribution: %1").arg(sf.yaraFamily);
+        if (!sf.yaraSeverity.isEmpty())
+          ind << QString("Worst rule severity: %1").arg(sf.yaraSeverity);
+        for (const QString& r : sf.yaraMatches)
+          ind << QString("Rule: %1").arg(r);
+        sf.keyIndicators = ind;
+      }
+      if (sf.recommendedActions.isEmpty()) {
+        sf.recommendedActions = QStringList{
+            QStringLiteral("Review the matched rule definitions to confirm relevance"),
+            QStringLiteral("Quarantine the file if the rules indicate confirmed malware"),
+            QStringLiteral("Submit the file hash to VirusTotal for cross-validation")
+        };
+      }
     }
     // --- Detection pass 3: AI anomaly scoring (fallback) ---
     else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
       flagged = true;
       aiOnlyFlag = true;  // track: only AI triggered, no hash/YARA corroboration
       // Map anomalyScore (0.0-1.0) → confidence percentage.
+      // ── ITEM 2 — ceiling lowered from 99 → 90.
+      // AI-only findings can never exceed 90% confidence even if the
+      // model returns 1.0. Hash hits get the 95% top-of-scale; YARA
+      // hits land in the same band via the YaraScanner default
+      // (75–95% based on rule severity). This keeps the scale
+      // monotonic: hash > YARA > AI strong > AI weak.
       const float thr = (sf.anomalyThreshold > 0.0f) ? sf.anomalyThreshold : 0.5f;
       const float adj = (sf.anomalyScore - thr) / std::max(0.001f, 1.0f - thr);
-      sf.confidencePct = std::clamp(50.0f + 50.0f * adj, 5.0f, 99.0f);
+      sf.confidencePct = std::clamp(40.0f + 50.0f * adj, 5.0f, 90.0f);
+
+      // ── BUG-FIX 3 — AI-only findings are capped at "Suspicious" ──
+      // Critical is reserved for *corroborated* threats (hash hit, YARA
+      // rule, reputation DB match). The ML model's confidence alone is
+      // not enough to justify a Critical verdict — the v2/v3 model is
+      // synthetic-trained and routinely scored normal dev/app files at
+      // 0.99+, leading to false-positive Criticals on GitKraken,
+      // Minecraft jars, Claude session files, etc.  This downgrade is
+      // applied regardless of code-signing status; the dedicated AI-only
+      // signing-trust downgrade below can drop it further to Anomalous.
+      if (sf.classificationLevel == "Critical") {
+        sf.classificationLevel = "Suspicious";
+        sf.severityLevel       = "High";
+        sf.confidencePct       = std::min(sf.confidencePct, 80.0f);
+        reason +=
+            "\n[Severity capped from Critical → Suspicious — AI-only "
+            "finding without hash, YARA, or reputation corroboration. "
+            "Critical is reserved for confirmed-malicious matches.]";
+      }
+
+      // ── ITEM 1 — dev-environment file-path suppression ──
+      // If an AI-only finding lives in a recognised dev/tooling
+      // directory, downgrade further to Anomalous (Needs Review) with
+      // the path label appended to the reason. Hash hits never reach
+      // this branch (handled in the if-arm above), so genuine malware
+      // dropped into ~/Library/Application Support is still flagged
+      // Critical.
+      const QString devLabel = devToolPathLabel(item.filePath);
+      if (!devLabel.isEmpty()) {
+        sf.classificationLevel = "Anomalous";
+        sf.severityLevel       = "Low";
+        sf.confidencePct       = std::min(sf.confidencePct, 55.0f);
+        reason +=
+            QString("\n[Likely development artifact / tooling file — "
+                    "path matches %1. Downgraded to Needs Review "
+                    "because no hash, YARA, or reputation signal "
+                    "corroborates the AI verdict.]").arg(devLabel);
+      }
     }
 
     if (flagged) {
