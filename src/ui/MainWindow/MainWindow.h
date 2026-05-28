@@ -4,9 +4,13 @@
 #include <QString>
 #include <QVector>
 
+#include "../../../include/monitor/ProcessInfo.h"  // for SystemSnapshot
 #include "../../core/FileScanner.h"
-#include "../../db/ScanDatabase.h"   // for SuspiciousFile, ScanRecord
+#include "../../db/ScanDatabase.h"                 // for SuspiciousFile, ScanRecord
 #include "../ScanTypeOverlay/ScanTypeOverlay.h"
+
+class SystemMonitor;
+class SystemStatusPanel;
 
 class LLMExplainer;
 
@@ -24,190 +28,284 @@ class QTimer;
 class QNetworkAccessManager;
 class QNetworkReply;
 class QScrollArea;
+class QThread;
 
 class FileScanner;
+class Sidebar;
+class QStackedWidget;
+class DashboardPage;
+class ThreatDetailPanel;
+class ResultsPage;
+class ScanPage;
+class AlertsPage;
+class QuarantinePage;
+class MonitoringService;
+namespace EDR {
+struct Alert;
+}
 
-class MainWindow : public QMainWindow
-{
-    Q_OBJECT
+class MainWindow : public QMainWindow {
+  Q_OBJECT
 
-public:
-    explicit MainWindow(QWidget *parent = nullptr);
-    ~MainWindow() override;
+ public:
+  explicit MainWindow(QWidget* parent = nullptr);
+  ~MainWindow() override;
 
-private slots:
-    // ---- Existing (logic unchanged) ----
-    void onSimulateThreatClicked();
-    void onFilterOrSearchChanged();
-    void onThreatDoubleClicked(int row, int column);
-    void onCloseDetailsClicked();
+ private slots:
+  // ---- Existing (logic unchanged) ----
+  void onSimulateThreatClicked();
+  void onFilterOrSearchChanged();
+  void onThreatDoubleClicked(int row, int column);
+  void onCloseDetailsClicked();
 
-    // ---- Scan ----
-    void onRunScanClicked();
-    void onFullScanRequested();
-    void onPartialScanRequested(const QString& path);
-    void onResumeScanRequested();
-    void onScanningPath(const QString& path);
-    void onProgressUpdated(int percent);
-    void onSuspiciousFileFound(const SuspiciousFile& file);
-    void onScanFinished(int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
-    void onScanError(const QString& message);
-    void onCloseScanResultsClicked();
-    void onScanTimerTick();
+  // ---- Scan ----
+  void onRunScanClicked();
+  void onFullScanRequested();
+  void onPartialScanRequested(const QString& path);
+  void onResumeScanRequested();
+  void onScanningPath(const QString& path);
+  void onProgressUpdated(int percent);
+  void onSuspiciousFileFound(const SuspiciousFile& file);
+  void onScanFinished(
+      int totalScanned, int suspiciousCount, int elapsedSeconds, qint64 bytesScanned);
+  void onScanError(const QString& message);
+  void onCloseScanResultsClicked();
+  void onScanTimerTick();
 
-    // ---- History ----
-    void onHistoryClicked();
-    void onHistoryItemClicked(QListWidgetItem* item);
-    void onCloseHistoryClicked();
+  // ---- History ----
+  void onHistoryClicked();
+  void onHistoryItemClicked(QListWidgetItem* item);
+  void onCloseHistoryClicked();
 
-    // ---- CVE lookup ----
-    void onCveLookupReply(QNetworkReply* reply);
+  // ---- System Status (Phase 2) ----
+  void onSystemStatusClicked();
+  void onSystemRefreshRequested();
+  void onSystemCloseRequested();
+  void onSystemSnapshotReady(const SystemSnapshot& snap);
+  void onSystemSnapshotError(const QString& message);
 
-    // ---- On-demand LLM explanation ----
-    void onLlmExplanationReady(int findingIndex, const QString& explanation, bool success);
+  // ---- CVE lookup ----
+  void onCveLookupReply(QNetworkReply* reply);
 
-    // ---- Database ----
-    void onDbRecordSaved(qint64 scanId);
-    void onCacheUpdateReady(const QVector<CacheEntry>& entries);
+  // ---- On-demand LLM explanation ----
+  void onLlmExplanationReady(int findingIndex, const QString& explanation, bool success);
 
-private:
-    // -----------------------------------------------------------------------
-    // Panel identity (only one right-side panel visible at a time)
-    // -----------------------------------------------------------------------
-    enum class ActivePanel { None, ThreatDetails, ScanResults, History, HistoryDetail };
+  // ---- Database ----
+  void onDbRecordSaved(qint64 scanId);
+  void onCacheUpdateReady(const QVector<CacheEntry>& entries);
 
-    // -----------------------------------------------------------------------
-    // Scan mode – determines the storage denominator shown in the scan panel
-    // -----------------------------------------------------------------------
-    enum class ScanMode { Full, Partial, Resumed };
+ private:
+  // -----------------------------------------------------------------------
+  // Panel identity (only one right-side panel visible at a time)
+  // -----------------------------------------------------------------------
+  enum class ActivePanel { None, ThreatDetails, ScanResults, History, HistoryDetail, SystemStatus };
 
-    void showPanel(ActivePanel panel);
+  // -----------------------------------------------------------------------
+  // Scan mode – determines the storage denominator shown in the scan panel
+  // -----------------------------------------------------------------------
+  enum class ScanMode { Full, Partial, Resumed };
 
-    // -----------------------------------------------------------------------
-    // UI helpers
-    // -----------------------------------------------------------------------
-    void setupUi();
-    void loadTestData();
-    void addThreatEntry(const QString& severity, const QString& name,
-                        const QString& vendor,   const QString& date,
-                        const QString& status);
-    void startScanForPath(const QString& rootPath);
+  void showPanel(ActivePanel panel);
 
-    // Inserts a row into threatTable for a scan finding (with CVE if found)
-    void addScanFindingToTable(const SuspiciousFile& sf);
+  // -----------------------------------------------------------------------
+  // UI helpers
+  // -----------------------------------------------------------------------
+  void setupUi();
+  void loadTestData();
+  void addThreatEntry(
+      const QString& severity,
+      const QString& name,
+      const QString& vendor,
+      const QString& date,
+      const QString& status);
+  void startScanForPath(const QString& rootPath);
 
-    // Kick off NVD API query for a single finding
-    void lookupCveForFinding(int findingIndex);
+  // Inserts a row into threatTable for a scan finding (with CVE if found)
+  void addScanFindingToTable(const SuspiciousFile& sf);
 
-    // Fire an async LLM explanation request for a finding
-    void requestLlmExplanation(int findingIndex);
+  // Kick off NVD API query for a single finding
+  void lookupCveForFinding(int findingIndex);
 
-    // Refresh the detail panel LLM section (called after LLM completes)
-    void refreshDetailLlmSection(const SuspiciousFile& sf);
+  // Fire an async LLM explanation request for a finding
+  void requestLlmExplanation(int findingIndex);
 
-    // Format elapsed seconds as MM:SS
-    static QString formatElapsed(int secs);
+  // Refresh the detail panel LLM section (called after LLM completes)
+  void refreshDetailLlmSection(const SuspiciousFile& sf);
 
-    // Resize overlay when the window resizes
-    void resizeEvent(QResizeEvent* event) override;
+  // Format elapsed seconds as MM:SS
+  static QString formatElapsed(int secs);
 
-    // Populate historyDetailPanel from a ScanRecord
-    void showHistoryDetail(const ScanRecord& record);
+  // Resize overlay when the window resizes
+  void resizeEvent(QResizeEvent* event) override;
 
-    // -----------------------------------------------------------------------
-    // Existing widgets
-    // -----------------------------------------------------------------------
-    QPushButton*  runScanButton;
-    QPushButton*  historyButton;      // NEW – top header
-    QTableWidget* threatTable;
-    QLineEdit*    searchInput;
-    QComboBox*    severityFilter;
+  // Populate historyDetailPanel from a ScanRecord
+  void showHistoryDetail(const ScanRecord& record);
 
-    // Threat-details panel
-    QFrame*  detailsPanel;
-    QLabel*  detailsTitleLabel;
-    QLabel*  detailsDescLabel;
-    QLabel*  detailsAILabel;
-    QLabel*  detailsMitreLabel;
+  // -----------------------------------------------------------------------
+  // Existing widgets
+  // -----------------------------------------------------------------------
+  QPushButton* runScanButton;
+  QPushButton* historyButton;       // NEW – top header
+  QPushButton* systemStatusButton;  // Phase 2 – top header
+  QTableWidget* threatTable;
+  QLineEdit* searchInput;
+  QComboBox* severityFilter;
 
-    // -----------------------------------------------------------------------
-    // AI Stats dashboard (replaces static stats)
-    // -----------------------------------------------------------------------
-    QLabel*  aiStatsTotalLabel;
-    QLabel*  aiStatsCritLabel;
-    QLabel*  aiStatsSuspLabel;
-    QLabel*  aiStatsReviewLabel;
-    QLabel*  aiStatsCleanLabel;
-    QLabel*  aiStatsAvgScoreLabel;
-    QLabel*  aiStatsModelLabel;
-    QLabel*  aiStatsLlmLabel;           // LLM status indicator
-    QFrame*  aiScoreFillBar;            // visual score indicator
+  // Threat-details panel
+  QFrame* detailsPanel;
+  QLabel* detailsTitleLabel;
+  QLabel* detailsDescLabel;
+  QLabel* detailsAILabel;
+  QLabel* detailsMitreLabel;
 
-    // -----------------------------------------------------------------------
-    // Scan-results panel
-    // -----------------------------------------------------------------------
-    QFrame*       scanResultsPanel;
-    QLabel*       scanStatusLabel;
-    QLabel*       scanPathLabel;
-    QProgressBar* scanProgressBar;
-    QLabel*       scanElapsedLabel;
-    QLabel*       scanStorageLabel;
-    QListWidget*  scanResultsList;
-    QLabel*       scanSummaryLabel;
-    QPushButton*  closeScanButton;
+  // -----------------------------------------------------------------------
+  // AI Stats dashboard (replaces static stats)
+  // -----------------------------------------------------------------------
+  QLabel* aiStatsTotalLabel;
+  QLabel* aiStatsCritLabel;
+  QLabel* aiStatsSuspLabel;
+  QLabel* aiStatsReviewLabel;
+  QLabel* aiStatsCleanLabel;
+  QLabel* aiStatsAvgScoreLabel;
+  QLabel* aiStatsModelLabel;
+  QLabel* aiStatsLlmLabel;  // LLM status indicator
+  QFrame* aiScoreFillBar;   // visual score indicator
 
-    // -----------------------------------------------------------------------
-    // History list panel
-    // -----------------------------------------------------------------------
-    QFrame*      historyPanel;
-    QListWidget* historyList;
-    QPushButton* closeHistoryButton;
+  // -----------------------------------------------------------------------
+  // Scan-results panel
+  // -----------------------------------------------------------------------
+  QFrame* scanResultsPanel;
+  QLabel* scanStatusLabel;
+  QLabel* scanPathLabel;
+  QProgressBar* scanProgressBar;
+  QLabel* scanElapsedLabel;
+  QLabel* scanStorageLabel;
+  QListWidget* scanResultsList;
+  QLabel* scanSummaryLabel;
+  QPushButton* closeScanButton;
 
-    // -----------------------------------------------------------------------
-    // History detail panel (shown when a history entry is clicked)
-    // -----------------------------------------------------------------------
-    QFrame*      historyDetailPanel;
-    QLabel*      histDetailTitleLabel;
-    QLabel*      histDetailSummaryLabel;
-    QListWidget* histDetailFilesList;
-    QPushButton* closeHistoryDetailButton;
+  // -----------------------------------------------------------------------
+  // History list panel
+  // -----------------------------------------------------------------------
+  QFrame* historyPanel;
+  QListWidget* historyList;
+  QPushButton* closeHistoryButton;
 
-    // -----------------------------------------------------------------------
-    // Scan-type selection overlay
-    // -----------------------------------------------------------------------
-    ScanTypeOverlay*        m_scanOverlay   = nullptr;
+  // -----------------------------------------------------------------------
+  // History detail panel (shown when a history entry is clicked)
+  // -----------------------------------------------------------------------
+  QFrame* historyDetailPanel;
+  QLabel* histDetailTitleLabel;
+  QLabel* histDetailSummaryLabel;
+  QListWidget* histDetailFilesList;
+  QPushButton* closeHistoryDetailButton;
 
-    // Scanner engine
-    // -----------------------------------------------------------------------
-    FileScanner*            m_scanner       = nullptr;
-    QVector<SuspiciousFile> m_findings;               // current scan
-    QVector<ScanRecord>     m_history;                // all completed scans
-    ActivePanel             m_activePanel   = ActivePanel::None;
+  // -----------------------------------------------------------------------
+  // Scan-type selection overlay
+  // -----------------------------------------------------------------------
+  ScanTypeOverlay* m_scanOverlay = nullptr;
 
-    // Scan timer
-    QTimer* m_scanTimer       = nullptr;
-    int     m_elapsedSeconds  = 0;
-    qint64  m_driveTotalBytes = 0;
+  // Scanner engine
+  // -----------------------------------------------------------------------
+  FileScanner* m_scanner = nullptr;
+  QVector<SuspiciousFile> m_findings;  // current scan
+  QVector<ScanRecord> m_history;       // all completed scans
+  ActivePanel m_activePanel = ActivePanel::None;
 
-    // Scan mode and active flag (used for storage-label logic)
-    ScanMode m_scanMode   = ScanMode::Full;
-    bool     m_scanActive = false;
+  // Scan timer
+  QTimer* m_scanTimer = nullptr;
+  int m_elapsedSeconds = 0;
+  qint64 m_driveTotalBytes = 0;
 
-    // CVE lookup
-    QNetworkAccessManager*  m_nam           = nullptr;
-    int                     m_cveQueryIndex = 0;      // next finding to look up
+  // Scan mode and active flag (used for storage-label logic)
+  ScanMode m_scanMode = ScanMode::Full;
+  bool m_scanActive = false;
 
-    // Track how many CVE queries are in flight
-    int m_pendingCveQueries = 0;
+  // CVE lookup
+  QNetworkAccessManager* m_nam = nullptr;
+  int m_cveQueryIndex = 0;  // next finding to look up
 
-    // On-demand LLM explanation
-    LLMExplainer* m_llmExplainer      = nullptr;
-    bool          m_llmChecked        = false;   // have we probed Ollama yet?
-    bool          m_llmReachable      = false;   // is Ollama reachable?
-    int           m_llmPendingIndex   = -1;      // finding index being queried (-1 = idle)
-    int           m_detailFindingIdx  = -1;      // finding currently shown in detail panel
+  // Track how many CVE queries are in flight
+  int m_pendingCveQueries = 0;
 
-    // Database
-    ScanDatabase* m_db        = nullptr;
-    int           m_scanCount = 0;   // used to trigger periodic cache pruning
+  // On-demand LLM explanation
+  LLMExplainer* m_llmExplainer = nullptr;
+  bool m_llmChecked = false;    // have we probed Ollama yet?
+  bool m_llmReachable = false;  // is Ollama reachable?
+  int m_llmPendingIndex = -1;   // finding index being queried (-1 = idle)
+  int m_detailFindingIdx = -1;  // finding currently shown in detail panel
+
+  // Database
+  ScanDatabase* m_db = nullptr;
+  int m_scanCount = 0;  // used to trigger periodic cache pruning
+
+  // ---- Phase 2: System monitoring ----
+  SystemMonitor* m_sysmon = nullptr;
+  SystemStatusPanel* m_systemPanel = nullptr;
+
+  // ---- Phase 4: Dashboard shell (sidebar + page stack) ----
+  // Index values for m_pageStack: keep in sync with the order of addItem()
+  // calls inside setupShell().
+  enum NavPage {
+    PageDashboard = 0,
+    PageScan = 1,
+    PageResults = 2,
+    PageSystemStatus = 3,
+    PageRootkit = 4,
+    PageAlerts = 5,      // Phase 4 (EDR-Lite)
+    PageQuarantine = 6,  // Phase 5 — list + restore quarantined files
+    PageThreatIntel = 7,
+    PageReports = 8,
+    PageSettings = 9,
+  };
+  Sidebar* m_sidebar = nullptr;
+  QStackedWidget* m_pageStack = nullptr;
+  QWidget* m_legacyDashWrap = nullptr;          // hosts existing scan-progress UI on PageScan
+  DashboardPage* m_dashboardPage = nullptr;     // new Phase 4 dashboard (page 0)
+  ThreatDetailPanel* m_threatDetail = nullptr;  // Phase 4 Step 3 — right-slide detail panel
+  ResultsPage* m_resultsPage = nullptr;         // refactored Results tab (page 2)
+  ScanPage* m_scanPage = nullptr;               // refactored Scan tab (page 1)
+  AlertsPage* m_alertsPage = nullptr;           // Phase 4 EDR — Alerts (page 5)
+  QuarantinePage* m_quarantinePage = nullptr;   // Phase 5 — Quarantine list + restore (page 6)
+  MonitoringService* m_monitor = nullptr;       // Phase 4 EDR — periodic ticks
+
+  // Background directory-size walker for partial scans. Tracked so the
+  // destructor can interrupt + wait for it before MainWindow goes away
+  // (otherwise the lambda's QMetaObject::invokeMethod fires against a
+  // destroyed `this` → UAF on shutdown).
+  QThread* m_sizeThread = nullptr;
+
+  void setupShell();
+  QWidget* makePlaceholderPage(const QString& title, const QString& subtitle);
+
+  /// Stabilization B: hide the redundant legacy top-bar widgets (logo,
+  /// title, History/SystemStatus/RunScan buttons — all duplicated by the
+  /// sidebar) and re-skin the legacy threat table + search/filter so the
+  /// "Results" page matches the new dark theme.
+  void retireLegacyHeader();
+
+  /// Push current findings/history into the new dashboard.
+  /// No-op if the dashboard hasn't been built yet (during construction).
+  void refreshDashboard();
+
+ private slots:
+  void onSidebarPageRequested(int index);
+  void onDashboardScanRequested(int scanType);
+  void onDashboardViewAllActivity();
+  void onThreatDetailCloseRequested();
+  /// New ScanPage signals
+  void onScanPageStartRequested(const QStringList& targets, int depth);
+  void onScanPageExportLogs();
+  void onScanPageViewAllRecent();
+
+  /// EDR-Lite (Phase 4)
+  void onEdrAlertRaised(const EDR::Alert& alert);
+  void onEdrTickCompleted(int alertsThisTick, int durationMs);
+  void onEdrStateChanged(bool enabled);
+  void onSettingsConfigSaved();
+
+  /// Recompute the dashboard's risk-based security score from the
+  /// MonitoringService's live active-alert set. Called whenever an
+  /// alert is raised, updated, or resolved.
+  void refreshDashboardScore();
 };

@@ -6,55 +6,222 @@
 // const/atomic data on FileScannerWorker, so no global lock is held during
 // the actual SHA-256 computation.
 //
+// Phase 1 changes:
+//   • The flat hash blocklist is now sourced from ReputationDB
+//     (snapshot taken once per worker), with the existing data/
+//     malware_hashes.txt acting as the seed file.
+//   • runHashWorker() now invokes checkByYara() between the hash and AI
+//     passes, so YARA rule matches surface as findings even when no hash
+//     entry exists.
+//   • SHA-256 is computed once and cached in SuspiciousFile / CacheEntry
+//     so the reputation DB and downstream passes don't recompute it.
+//
 // Compiled with -O3: this is the most CPU/IO-intensive path in the scanner.
 
-#include "FileScanner.h"
-
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
-#include <QCryptographicHash>
-#include <QCoreApplication>
 #include <QMutexLocker>
-#include <QDateTime>
+#include <algorithm>  // std::clamp, std::max
+#include <atomic>
+
+#include "FileScanner.h"
+#include "core/ScannerConfig.h"
+#include "reputation/CodeSigning.h"
+#include "reputation/ReputationDB.h"
+#include "response/Allowlist.h"
+#include "response/ResponseManagerSingleton.h"  // Phase 5 — allowlist suppression
+
+// Provided by FileScannerYaraReputation.cpp – returns the singleton or nullptr.
+extern ReputationDB* odysseus_getReputationDB();
+
+// ============================================================================
+// Developer / tooling path classifier (file-scan companion to the
+// process-level dev-tool classifier in SuspiciousHeuristics.cpp).
+//
+// When a finding is flagged ONLY by AI/YARA (no hash hit) AND its path
+// lives under a known dev/tooling directory — e.g. ~/Library/Application
+// Support, ~/Library/Developer, ~/.cache, node_modules, __pycache__,
+// site-packages — we downgrade the verdict to NEEDS_REVIEW and stamp a
+// reason tag. This kills the GitKraken / Minecraft / Claude-session-jsonl
+// false-positive class without globally trusting those locations: a hash
+// match in one of these directories still surfaces as Critical.
+//
+// Returns the human-readable label of the matched dev-tool path, or an
+// empty string when the path is NOT in a recognised dev/tooling dir.
+// ============================================================================
+static QString devToolPathLabel(const QString& path)
+{
+    // Lowercase for case-insensitive comparisons (macOS HFS+ + APFS are
+    // case-insensitive by default, NTFS is too). Also normalise the path
+    // separator so the same fragments work on Windows-style backslashes.
+    QString lp = path.toLower();
+    lp.replace('\\', '/');
+
+    // Order: most specific first.
+    struct Rule { const char* fragment; const char* label; };
+    static const Rule kRules[] = {
+        // macOS application support / developer caches.
+        {"/library/application support/",     "macOS Application Support"},
+        {"/library/developer/",                "Xcode / Developer"},
+        {"/library/caches/",                   "macOS user caches"},
+        {"/.cache/",                           "User cache (~/.cache)"},
+
+        // Language toolchains + package managers.
+        {"/node_modules/",                     "Node.js (node_modules)"},
+        {"/site-packages/",                    "Python (site-packages)"},
+        {"/__pycache__/",                       "Python (__pycache__)"},
+        {"/.cargo/",                           "Rust (cargo)"},
+        {"/.rustup/",                          "Rust (rustup)"},
+        {"/.npm/",                             "npm cache"},
+        {"/.npm-global/",                      "npm (global)"},
+        {"/.yarn/",                            "Yarn"},
+        {"/.pnpm/",                            "pnpm"},
+        {"/.deno/",                            "Deno"},
+        {"/.bun/",                             "Bun"},
+        {"/.nvm/",                             "Node (nvm)"},
+        {"/.pyenv/",                           "Python (pyenv)"},
+        {"/.poetry/",                          "Python (poetry)"},
+        {"/.gradle/",                          "Gradle"},
+        {"/.m2/",                              "Maven"},
+        {"/.dotnet/",                          ".NET"},
+        {"/.nuget/",                           ".NET (NuGet)"},
+        {"/.go/",                              "Go"},
+        {"/.gopath/",                          "Go (GOPATH)"},
+
+        // Editor / IDE caches (macOS layouts).
+        {"/.vscode/",                          "VS Code"},
+        {"/.vscode-server/",                   "VS Code (remote)"},
+        {"/.cursor/",                          "Cursor"},
+        {"/.cursor-server/",                   "Cursor (remote)"},
+        {"/.windsurf/",                        "Windsurf"},
+        {"/.atom/",                            "Atom"},
+
+        // Homebrew + Xcode toolchains (already path-skipped at enumeration
+        // for most users, but a partial scan into /opt or /usr can still
+        // reach them — keep the rule for completeness).
+        {"/cellar/",                           "Homebrew (Cellar)"},
+        {"/homebrew/",                         "Homebrew"},
+        {"/xcode.app/",                        "Xcode"},
+        {"/deriveddata/",                      "Xcode (DerivedData)"},
+    };
+
+    for (const Rule& r : kRules) {
+        if (lp.contains(QLatin1String(r.fragment)))
+            return QString::fromLatin1(r.label);
+    }
+    return {};
+}
 
 // ============================================================================
 // loadHashDatabase  –  static, called once at worker construction.
+//
+// Phase 1: prefer the structured ReputationDB. The flat-text file remains
+// as a seed and a fallback when the DB cannot be opened (e.g. AppData
+// directory is read-only on a forensic boot).
 // ============================================================================
-QHash<QString, QString> FileScannerWorker::loadHashDatabase()
-{
-    QHash<QString, QString> db;
+QHash<QString, QString> FileScannerWorker::loadHashDatabase() {
+  // ----- Preferred path: snapshot from ReputationDB --------------------
+  if (ReputationDB* rep = odysseus_getReputationDB()) {
+    QHash<QString, QString> db = rep->snapshotHashIndex();
+    if (!db.isEmpty())
+      return db;
+  }
 
-    const QString appDir = QCoreApplication::applicationDirPath();
-    const QStringList candidates = {
-        appDir + "/data/malware_hashes.txt",         // installed / cmake-copied
-        appDir + "/../data/malware_hashes.txt",       // one level up
-        appDir + "/../../data/malware_hashes.txt",    // two levels up (source root)
-        appDir + "/../../../data/malware_hashes.txt", // three levels (nested build)
-    };
+  // ----- Fallback path: parse data/malware_hashes.txt directly ---------
+  QHash<QString, QString> db;
+  const QString appDir = QCoreApplication::applicationDirPath();
+  const QStringList candidates = {
+      appDir + "/data/malware_hashes.txt",           // installed / cmake-copied
+      appDir + "/../data/malware_hashes.txt",        // one level up
+      appDir + "/../../data/malware_hashes.txt",     // two levels up (source root)
+      appDir + "/../../../data/malware_hashes.txt",  // three levels (nested build)
+  };
 
-    for (const QString& path : candidates) {
-        QFile f(path);
-        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
-            continue;
+  for (const QString& path : candidates) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+      continue;
 
-        while (!f.atEnd()) {
-            const QString line = QString::fromUtf8(f.readLine()).trimmed();
-            if (line.isEmpty() || line.startsWith('#'))
-                continue;
+    while (!f.atEnd()) {
+      const QString line = QString::fromUtf8(f.readLine()).trimmed();
+      if (line.isEmpty() || line.startsWith('#'))
+        continue;
 
-            // Format: <sha256_hex>  <Malware Name / Description>
-            const int spaceIdx = line.indexOf(' ');
-            const QString hash = (spaceIdx > 0 ? line.left(spaceIdx) : line).toLower();
-            const QString name = (spaceIdx > 0) ? line.mid(spaceIdx + 1).trimmed()
-                                                 : QStringLiteral("Unknown Malware");
+      // Format: <sha256_hex>  <Malware Name / Description>
+      const int spaceIdx = line.indexOf(' ');
+      const QString hash = (spaceIdx > 0 ? line.left(spaceIdx) : line).toLower();
+      const QString name =
+          (spaceIdx > 0) ? line.mid(spaceIdx + 1).trimmed() : QStringLiteral("Unknown Malware");
 
-            if (hash.length() == 64)  // SHA-256 = 64 hex chars
-                db.insert(hash, name);
-        }
-        break;  // loaded from first valid path
+      if (hash.length() == 64)  // SHA-256 = 64 hex chars
+        db.insert(hash, name);
     }
+    break;  // loaded from first valid path
+  }
 
-    return db;
+  return db;
+}
+
+// ============================================================================
+// hashFileSha256  –  helper used by checkByHash and the YARA/AI paths.
+//
+// Returns the SHA-256 hex digest of the file, or an empty string on:
+//   • exempt extension or network filesystem
+//   • size 0 or > 200 MB
+//   • I/O error
+//
+// Static / pure: no member access. Safe to call from multiple threads.
+// ============================================================================
+static QString hashFileSha256(const QString& filePath, qint64 fileSize) {
+  constexpr qint64 maxHashBytes = 200LL * 1024 * 1024;
+  constexpr qint64 mmapThreshold = 256LL * 1024;
+
+  if (fileSize <= 0 || fileSize > maxHashBytes)
+    return {};
+
+  QFile f(filePath);
+  if (!f.open(QIODevice::ReadOnly))
+    return {};
+
+  QCryptographicHash hasher(QCryptographicHash::Sha256);
+  bool readOk = true;
+
+  if (fileSize >= mmapThreshold) {
+    uchar* mapped = f.map(0, fileSize);
+    if (mapped) {
+      hasher.addData(QByteArrayView(mapped, static_cast<qsizetype>(fileSize)));
+      f.unmap(mapped);
+    } else {
+      readOk = false;  // fall through to chunked read
+    }
+  }
+  if (!readOk || fileSize < mmapThreshold) {
+    f.seek(0);
+    // P3: thread_local buffer — allocated once per worker thread, reused across files.
+    static thread_local QByteArray buf(256 * 1024, Qt::Uninitialized);
+    qint64 totalRead = 0;
+    while (!f.atEnd()) {
+      const qint64 n = f.read(buf.data(), buf.size());
+      if (n < 0) {
+        f.close();
+        return {};
+      }  // hard I/O error
+      if (n == 0)
+        break;
+      hasher.addData(QByteArrayView(buf.constData(), static_cast<qsizetype>(n)));
+      totalRead += n;
+    }
+    // Partial read = corrupt/permission-denied mid-file = abort.
+    if (totalRead == 0) {
+      f.close();
+      return {};
+    }
+  }
+  f.close();
+  return QString::fromLatin1(hasher.result().toHex()).toLower();
 }
 
 // ============================================================================
@@ -64,70 +231,51 @@ QHash<QString, QString> FileScannerWorker::loadHashDatabase()
 // m_noHashExtensions, m_ctx), making it safe to call from multiple threads
 // simultaneously with no locking.
 //
-// Uses memory-mapped I/O for files >= 256 KB (avoids user-space copy buffers;
-// the OS page-cache handles prefetch efficiently on SSDs).  Falls back to
-// chunked reads for smaller files or if mmap fails.
+// Phase 1: also stores the computed SHA-256 in `outSha` so YARA + AI passes
+// (and the reputation DB sighting bump) can reuse it without re-hashing.
 // ============================================================================
-bool FileScannerWorker::checkByHash(const QString& filePath,
-                                     const QString& ext,
-                                     qint64         fileSize,
-                                     QString&       outReason,
-                                     QString&       outCategory) const
-{
-    if (m_noHashExtensions.contains(ext))
-        return false;
-
-    if (m_ctx.isNetworkFs)
-        return false;
-
-    constexpr qint64 maxHashBytes   = 200LL * 1024 * 1024;   // 200 MB hard cap
-    constexpr qint64 mmapThreshold  = 256LL * 1024;           // 256 KB mmap crossover
-
-    if (fileSize <= 0 || fileSize > maxHashBytes)
-        return false;
-
-    if (m_hashDb.isEmpty())
-        return false;
-
-    QFile f(filePath);
-    if (!f.open(QIODevice::ReadOnly))
-        return false;
-
-    QCryptographicHash hasher(QCryptographicHash::Sha256);
-
-    if (fileSize >= mmapThreshold) {
-        // Memory-mapped path: no user-space copy; OS manages page faults.
-        uchar* mapped = f.map(0, fileSize);
-        if (mapped) {
-            hasher.addData(QByteArrayView(mapped, static_cast<qsizetype>(fileSize)));
-            f.unmap(mapped);
-        } else {
-            // mmap failed (e.g. tmpfs with no backing) – fall through to read.
-            goto chunked_read;
-        }
-    } else {
-        chunked_read:
-        // Chunked-read path for small files or mmap fallback.
-        char buf[65536];
-        while (!f.atEnd()) {
-            const qint64 n = f.read(buf, sizeof(buf));
-            if (n <= 0) break;
-            hasher.addData(QByteArrayView(buf, static_cast<qsizetype>(n)));
-        }
-    }
-    f.close();
-
-    const QString hex = QString::fromLatin1(hasher.result().toHex()).toLower();
-
-    const auto it = m_hashDb.constFind(hex);
-    if (it != m_hashDb.constEnd()) {
-        outCategory = "Known Malware Hash";
-        outReason   = QString("SHA-256 matches known malware sample: %1  [%2]")
-                          .arg(it.value(), hex);
-        return true;
-    }
-
+bool FileScannerWorker::checkByHash(
+    const QString& filePath,
+    const QString& ext,
+    qint64 fileSize,
+    QString& outReason,
+    QString& outCategory,
+    QString& outSha256) const {
+  if (m_noHashExtensions.contains(ext))
     return false;
+
+  if (m_ctx.isNetworkFs)
+    return false;
+
+  if (m_hashDb.isEmpty())
+    return false;
+
+  const QString hex = hashFileSha256(filePath, fileSize);
+  if (hex.isEmpty())
+    return false;
+
+  // P2: always expose the computed hash so callers avoid recomputing it.
+  outSha256 = hex;
+
+  const auto it = m_hashDb.constFind(hex);
+  if (it != m_hashDb.constEnd()) {
+    outCategory = "Known Malware Hash";
+    outReason = QString("SHA-256 matches known malware sample: %1  [%2]").arg(it.value(), hex);
+    return true;
+  }
+
+  return false;
+}
+
+// ============================================================================
+// hashFileForOdysseus  –  external alias used by other detection passes.
+//
+// Exposed so checkByYara / checkByAI can compute (or reuse) a file's SHA-256
+// without depending on FileScannerWorker internals. The free function lives
+// outside the class so callers don't need a worker instance.
+// ============================================================================
+QString hashFileForOdysseus(const QString& filePath, qint64 fileSize) {
+  return hashFileSha256(filePath, fileSize);
 }
 
 // ============================================================================
@@ -143,97 +291,369 @@ bool FileScannerWorker::checkByHash(const QString& filePath,
 // Clean-file cache entries are accumulated locally and merged under a
 // fine-grained mutex at the end to minimise contention.
 // ============================================================================
-void FileScannerWorker::runHashWorker()
-{
-    QVector<CacheEntry> localCache;
+void FileScannerWorker::runHashWorker() {
+  // P4: snapshot config + reputation handle once before the loop.
+  // Both ScannerConfigStore::current() and odysseus_getReputationDB() acquire
+  // a mutex; calling them per-file causes contention across 4 worker threads.
+  const ScannerConfig cfg = ScannerConfigStore::current();
+  ReputationDB* rep = odysseus_getReputationDB();
 
-    for (;;) {
-        FileWorkItem item;
+  // Phase 5 — process-wide Allowlist for suppression. Cheap pointer read;
+  // Allowlist itself is internally synchronized.
+  odysseus::response::Allowlist* allowlist = odysseus::response::globalAllowlist();
 
-        {
-            QMutexLocker lock(&m_workMutex);
+  QVector<CacheEntry> localCache;
+  localCache.reserve(256);
 
-            // Wait until there's work, enumeration is done, or scan cancelled.
-            while (m_workQueue.isEmpty()
-                   && !m_enumDone
-                   && m_cancelFlag->loadRelaxed() == 0)
-            {
-                m_workHasItems.wait(&m_workMutex);
-            }
+  auto flushLocalCache = [&]() {
+    if (localCache.isEmpty())
+      return;
+    QMutexLocker lock(&m_cacheMutex);
+    m_sharedCacheUpdates.reserve(m_sharedCacheUpdates.size() + localCache.size());
+    for (auto& e : localCache)
+      m_sharedCacheUpdates.append(std::move(e));
+    localCache.clear();
+    localCache.reserve(256);
+  };
 
-            // Exit conditions: queue drained after enumeration, or cancelled.
-            if (m_workQueue.isEmpty())
-                break;
+  for (;;) {
+    FileWorkItem item;
 
-            item = m_workQueue.dequeue();
-            // Signal the producer that there's space again.
-            m_workHasSpace.wakeOne();
-        }
+    {
+      QMutexLocker lock(&m_workMutex);
 
-        if (m_cancelFlag->loadRelaxed() != 0)
-            break;
+      // Wait until there's work, enumeration is done, or scan cancelled.
+      while (m_workQueue.isEmpty() && !m_enumDone.load(std::memory_order_acquire) &&
+             m_cancelFlag->loadRelaxed() == 0) {
+        m_workHasItems.wait(&m_workMutex);
+      }
 
-        // Count every dequeued file as "scanned" and as a cache miss
-        // (these items were not served from cache – they need full analysis).
-        m_totalScanned.fetchAndAddRelaxed(1);
-        m_cacheMisses.fetchAndAddRelaxed(1);
+      // Exit conditions: queue drained after enumeration, or cancelled.
+      if (m_workQueue.isEmpty())
+        break;
 
-        QString reason, category;
-        bool flagged = false;
-        SuspiciousFile sf;  // pre-allocate; AI pass populates extra fields
-
-        // --- Detection pass 1: known-hash lookup ---
-        if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category)) {
-            flagged = true;
-        }
-        // --- Detection pass 2: AI anomaly scoring (fallback) ---
-        else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
-            flagged = true;
-        }
-
-        if (flagged) {
-            sf.filePath     = item.filePath;
-            sf.fileName     = QFileInfo(item.filePath).fileName();
-            sf.reason       = reason;
-            sf.category     = category;
-            sf.sizeBytes    = item.fileSize;
-            sf.lastModified = QDateTime::fromString(item.lastModified, Qt::ISODate);
-
-            // Thread-safe: queued connection delivers to the UI thread.
-            emit suspiciousFileFound(sf);
-            m_suspiciousCount.fetchAndAddRelaxed(1);
-
-            // Cache the flagged result so subsequent scans can replay it.
-            CacheEntry ce;
-            ce.filePath            = item.filePath;
-            ce.lastModified        = item.lastModified;
-            ce.fileSize            = item.fileSize;
-            ce.isFlagged           = true;
-            ce.reason              = reason;
-            ce.category            = category;
-            ce.classificationLevel = sf.classificationLevel;
-            ce.severityLevel       = sf.severityLevel;
-            ce.anomalyScore        = sf.anomalyScore;
-            ce.aiSummary           = sf.aiSummary;
-            ce.keyIndicators       = sf.keyIndicators;
-            ce.recommendedActions  = sf.recommendedActions;
-            ce.aiExplanation       = sf.aiExplanation;
-            ce.llmAvailable        = sf.llmAvailable;
-            localCache.append(std::move(ce));
-        } else {
-            // File is clean – record for incremental-scan cache.
-            CacheEntry ce;
-            ce.filePath     = item.filePath;
-            ce.lastModified = item.lastModified;
-            ce.fileSize     = item.fileSize;
-            ce.isFlagged    = false;
-            localCache.append(std::move(ce));
-        }
+      item = m_workQueue.dequeue();
+      // Signal the producer that there's space again.
+      m_workHasSpace.wakeOne();
     }
 
-    // Merge this worker's clean-file entries into the shared buffer.
-    if (!localCache.isEmpty()) {
-        QMutexLocker lock(&m_cacheMutex);
-        m_sharedCacheUpdates.append(std::move(localCache));
+    if (m_cancelFlag->loadRelaxed() != 0)
+      break;
+
+    // Count every dequeued file as "scanned" and as a cache miss
+    // (these items were not served from cache – they need full analysis).
+    m_totalScanned.fetchAndAddRelaxed(1);
+    m_cacheMisses.fetchAndAddRelaxed(1);
+
+    // ── Phase 5: early Allowlist suppression (path-only) ─────────────
+    // Cheap escape path — avoids hashing/YARA/AI on user-allowlisted files.
+    // SHA-256 entries are matched after the hash pass below.
+    if (allowlist && allowlist->isFileIgnored(item.filePath.toStdString(), {})) {
+      CacheEntry ce;
+      ce.filePath = item.filePath;
+      ce.lastModifiedMs = item.lastModifiedMs;
+      ce.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs).toString(Qt::ISODate);
+      ce.fileSize = item.fileSize;
+      ce.isFlagged = false;
+      localCache.append(std::move(ce));
+      if (localCache.size() >= 500)
+        flushLocalCache();
+      continue;
     }
+
+    QString reason, category;
+    bool flagged = false;
+    bool aiOnlyFlag = false;  // true when only the AI pass triggered
+    QString sha256;           // P2: populated by checkByHash even on miss
+    SuspiciousFile sf;        // pre-allocate; downstream passes populate fields
+
+    // --- Detection pass 1: known-hash lookup ---
+    if (checkByHash(item.filePath, item.ext, item.fileSize, reason, category, sha256)) {
+      flagged = true;
+      sf.sha256 = sha256;  // already computed by checkByHash
+      sf.classificationLevel = "Critical";
+      sf.severityLevel = "CRITICAL";
+      // ── ITEM 2 — confidence normalisation ──
+      // Hash matches are exact, but 1.000 reads as model-output and
+      // implies an AI confidence claim we don't own. The reputation
+      // DB itself can have stale or low-quality entries, so 0.95 is
+      // the high-water mark even for hash hits. Strong heuristics top
+      // out lower (see AI confidencePct mapping below).
+      sf.confidencePct = 95.0f;
+
+      // ── BUG-FIX 4 — deterministic explanation for hash matches ──
+      // The detail panel must never show blank "Why was this flagged?"
+      // / AI Summary / Indicators / Recommended Actions. The LLM is
+      // optional and intentionally not invoked for hash hits (no
+      // probabilistic analysis is needed for an exact match), so we
+      // populate canned text here instead of leaving the fields empty.
+      sf.aiSummary =
+          "This file's SHA-256 hash matches a known malware sample in "
+          "the local reputation database. Hash matches are exact and "
+          "high-confidence — no further AI analysis is required.";
+      sf.keyIndicators = QStringList{
+          QStringLiteral("Exact SHA-256 match against the malware database"),
+          QStringLiteral("Match source: local hash blocklist / reputation DB"),
+          reason  // includes the family name + truncated hex
+      };
+      sf.recommendedActions = QStringList{
+          QStringLiteral("Quarantine the file immediately and prevent execution"),
+          QStringLiteral("Submit the file hash to VirusTotal for multi-engine verification"),
+          QStringLiteral("Review system logs for signs of prior execution"),
+          QStringLiteral("Scan connected systems for lateral-movement indicators")
+      };
+    }
+    // --- Detection pass 2: YARA rule matching ---
+    else if (checkByYara(item.filePath, item.fileSize, reason, category, &sf)) {
+      flagged = true;
+      // YARA pass already filled classificationLevel + confidencePct,
+      // but the aiSummary / indicators / actions are typically empty
+      // (YARA itself doesn't generate prose). Provide a deterministic
+      // fallback so the detail panel is consistent across all sources.
+      // BUG-FIX 4.
+      if (sf.aiSummary.isEmpty()) {
+        sf.aiSummary =
+            "One or more YARA rules consistent with malicious behavior "
+            "fired on this file. YARA rule matches are author-curated "
+            "pattern matches against known threat indicators — review "
+            "the listed rule names below for the specific signal.";
+      }
+      if (sf.keyIndicators.isEmpty()) {
+        QStringList ind;
+        ind << QStringLiteral("YARA rule(s) fired during third-pass scan");
+        if (!sf.yaraFamily.isEmpty())
+          ind << QString("Family attribution: %1").arg(sf.yaraFamily);
+        if (!sf.yaraSeverity.isEmpty())
+          ind << QString("Worst rule severity: %1").arg(sf.yaraSeverity);
+        for (const QString& r : sf.yaraMatches)
+          ind << QString("Rule: %1").arg(r);
+        sf.keyIndicators = ind;
+      }
+      if (sf.recommendedActions.isEmpty()) {
+        sf.recommendedActions = QStringList{
+            QStringLiteral("Review the matched rule definitions to confirm relevance"),
+            QStringLiteral("Quarantine the file if the rules indicate confirmed malware"),
+            QStringLiteral("Submit the file hash to VirusTotal for cross-validation")
+        };
+      }
+    }
+    // --- Detection pass 3: AI anomaly scoring (fallback) ---
+    else if (checkByAI(item.filePath, item.fileSize, reason, category, &sf)) {
+      flagged = true;
+      aiOnlyFlag = true;  // track: only AI triggered, no hash/YARA corroboration
+      // Map anomalyScore (0.0-1.0) → confidence percentage.
+      // ── ITEM 2 — ceiling lowered from 99 → 90.
+      // AI-only findings can never exceed 90% confidence even if the
+      // model returns 1.0. Hash hits get the 95% top-of-scale; YARA
+      // hits land in the same band via the YaraScanner default
+      // (75–95% based on rule severity). This keeps the scale
+      // monotonic: hash > YARA > AI strong > AI weak.
+      const float thr = (sf.anomalyThreshold > 0.0f) ? sf.anomalyThreshold : 0.5f;
+      const float adj = (sf.anomalyScore - thr) / std::max(0.001f, 1.0f - thr);
+      sf.confidencePct = std::clamp(40.0f + 50.0f * adj, 5.0f, 90.0f);
+
+      // ── BUG-FIX 3 — AI-only findings are capped at "Suspicious" ──
+      // Critical is reserved for *corroborated* threats (hash hit, YARA
+      // rule, reputation DB match). The ML model's confidence alone is
+      // not enough to justify a Critical verdict — the v2/v3 model is
+      // synthetic-trained and routinely scored normal dev/app files at
+      // 0.99+, leading to false-positive Criticals on GitKraken,
+      // Minecraft jars, Claude session files, etc.  This downgrade is
+      // applied regardless of code-signing status; the dedicated AI-only
+      // signing-trust downgrade below can drop it further to Anomalous.
+      if (sf.classificationLevel == "Critical") {
+        sf.classificationLevel = "Suspicious";
+        sf.severityLevel       = "High";
+        sf.confidencePct       = std::min(sf.confidencePct, 80.0f);
+        reason +=
+            "\n[Severity capped from Critical → Suspicious — AI-only "
+            "finding without hash, YARA, or reputation corroboration. "
+            "Critical is reserved for confirmed-malicious matches.]";
+      }
+
+      // ── ITEM 1 — dev-environment file-path suppression ──
+      // If an AI-only finding lives in a recognised dev/tooling
+      // directory, downgrade further to Anomalous (Needs Review) with
+      // the path label appended to the reason. Hash hits never reach
+      // this branch (handled in the if-arm above), so genuine malware
+      // dropped into ~/Library/Application Support is still flagged
+      // Critical.
+      const QString devLabel = devToolPathLabel(item.filePath);
+      if (!devLabel.isEmpty()) {
+        sf.classificationLevel = "Anomalous";
+        sf.severityLevel       = "Low";
+        sf.confidencePct       = std::min(sf.confidencePct, 55.0f);
+        reason +=
+            QString("\n[Likely development artifact / tooling file — "
+                    "path matches %1. Downgraded to Needs Review "
+                    "because no hash, YARA, or reputation signal "
+                    "corroborates the AI verdict.]").arg(devLabel);
+      }
+    }
+
+    if (flagged) {
+      sf.filePath = item.filePath;
+      sf.fileName = QFileInfo(item.filePath).fileName();
+      sf.reason = reason;
+      sf.category = category;
+      sf.sizeBytes = item.fileSize;
+      // P5: convert epoch ms, not ISO string
+      sf.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs);
+
+      // P2: reuse hash already computed by checkByHash on the hash pass;
+      // only call hashFileForOdysseus for YARA/AI flagged files where
+      // checkByHash didn't run or was skipped (exempt ext / network FS).
+      if (sf.sha256.isEmpty()) {
+        if (!sha256.isEmpty())
+          sf.sha256 = sha256;  // reuse from hash pass (no match, but computed)
+        else if (!m_noHashExtensions.contains(item.ext) && !m_ctx.isNetworkFs)
+          sf.sha256 = hashFileForOdysseus(item.filePath, item.fileSize);
+      }
+
+      // ── Phase 5: Allowlist suppression (SHA-256) ─────────────────
+      // Hash-based allowlisting is the preferred form (path is unstable;
+      // hash uniquely identifies the file content). We let the file go
+      // through detection so the hash is computed, then suppress the
+      // finding here. The existing "unflagged" branch below writes a
+      // clean cache entry so subsequent scans skip the file entirely.
+      if (allowlist && !sf.sha256.isEmpty() &&
+          allowlist->isFileIgnored(item.filePath.toStdString(), sf.sha256.toStdString())) {
+        if (cfg.verboseLogging) {
+          qDebug().noquote() << "[Allowlist] suppressed finding —"
+                             << QFileInfo(item.filePath).fileName()
+                             << "(sha256:" << sf.sha256.left(12) + "...)";
+        }
+        flagged = false;
+        // Fall through to the !flagged branch below, which writes a
+        // clean cache entry and `continue`s the loop.
+      }
+
+      // ── Reputation DB enrichment ────────────────────────────────
+      if (rep && !sf.sha256.isEmpty()) {
+        ReputationRecord rr = rep->lookup(sf.sha256);
+        if (rr.isKnown()) {
+          sf.reputationFamily = rr.family;
+          sf.reputationSource = rr.source;
+          sf.reputationPrevalence = rr.prevalence;
+          sf.signingStatus = rr.signingStatus;
+          sf.signerId = rr.signerId;
+          rep->recordSighting(sf.sha256);
+        } else if (cfg.reputationAutoUpsert && !aiOnlyFlag) {
+          // Only persist YARA-confirmed findings into the reputation DB.
+          // AI-only detections are NOT upserted: the ML model's output
+          // is probabilistic, and adding it to the hash blocklist creates
+          // a self-reinforcing FP loop (AI guess → hash hit → Critical
+          // on every future scan, bypassing all threshold tuning).
+          ReputationRecord newRec;
+          newRec.sha256 = sf.sha256;
+          newRec.family = !sf.yaraFamily.isEmpty() ? sf.yaraFamily : QStringLiteral("YARA-flagged");
+          newRec.source = QStringLiteral("YARA/local");
+          newRec.severity = severityFromText(sf.severityLevel);
+          rep->upsert(newRec);
+          if (cfg.verboseLogging) {
+            qDebug().noquote() << "[Reputation] upserted YARA-confirmed hash"
+                               << sf.sha256.left(12) + "..." << "(family:" << newRec.family << ")";
+          }
+        }
+      }
+
+      // ── Code-signing check (gated by config) ──
+      // Always run for flagged files when enabled. For AI-only findings,
+      // a trusted signature downgrades or removes the finding entirely
+      // to cut FPs on legitimately-signed system and commercial binaries.
+      if (cfg.codeSigningEnabled && sf.signingStatus < 0) {
+        CodeSigning::Result cs = CodeSigning::verifyFile(item.filePath);
+        sf.signingStatus = CodeSigning::statusToInt(cs.status);
+        sf.signerId = cs.signerId;
+
+        if (rep && cfg.reputationAutoUpsert && !sf.sha256.isEmpty()) {
+          ReputationRecord upd;
+          upd.sha256 = sf.sha256;
+          upd.signingStatus = sf.signingStatus;
+          upd.signerId = sf.signerId;
+          rep->upsert(upd);
+        }
+
+        // For AI-only findings, apply trust-based downgrade:
+        //   Trusted + Anomalous  → unflag entirely (signed software with weak signal)
+        //   Trusted + Suspicious → downgrade to Anomalous (still surfaced, lower severity)
+        //   Trusted + Critical   → unchanged (strong signal regardless of signature)
+        //   Hash/YARA findings   → unchanged (concrete match overrides signing status)
+        if (aiOnlyFlag && cs.status == CodeSigning::Status::SignedTrusted) {
+          if (sf.classificationLevel == "Anomalous") {
+            flagged = false;  // weak AI signal on trusted-signed file = FP
+          } else if (sf.classificationLevel == "Suspicious") {
+            sf.classificationLevel = "Anomalous";
+            sf.severityLevel = "Low";
+            sf.confidencePct = std::min(sf.confidencePct * 0.35f, 20.0f);
+            reason += "\n[Note: signed by trusted authority — severity downgraded]";
+          }
+        }
+      }
+
+      if (!flagged) {
+        // Unflagged by code-signing trust check — record as clean.
+        CacheEntry ce;
+        ce.filePath = item.filePath;
+        ce.lastModifiedMs = item.lastModifiedMs;
+        ce.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs).toString(Qt::ISODate);
+        ce.fileSize = item.fileSize;
+        ce.isFlagged = false;
+        localCache.append(std::move(ce));
+        if (localCache.size() >= 500)
+          flushLocalCache();
+        continue;
+      }
+
+      // Thread-safe: queued connection delivers to the UI thread.
+      emit suspiciousFileFound(sf);
+      m_suspiciousCount.fetchAndAddRelaxed(1);
+
+      // Cache the flagged result so subsequent scans can replay it.
+      CacheEntry ce;
+      ce.filePath = item.filePath;
+      ce.lastModifiedMs = item.lastModifiedMs;
+      ce.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs).toString(Qt::ISODate);
+      ce.fileSize = item.fileSize;
+      ce.isFlagged = true;
+      ce.reason = reason;
+      ce.category = category;
+      ce.classificationLevel = sf.classificationLevel;
+      ce.severityLevel = sf.severityLevel;
+      ce.anomalyScore = sf.anomalyScore;
+      ce.aiSummary = sf.aiSummary;
+      ce.keyIndicators = sf.keyIndicators;
+      ce.recommendedActions = sf.recommendedActions;
+      ce.aiExplanation = sf.aiExplanation;
+      ce.llmAvailable = sf.llmAvailable;
+      ce.sha256 = sf.sha256;
+      ce.yaraMatches = sf.yaraMatches;
+      ce.yaraFamily = sf.yaraFamily;
+      ce.yaraSeverity = sf.yaraSeverity;
+      ce.reputationFamily = sf.reputationFamily;
+      ce.reputationSource = sf.reputationSource;
+      ce.reputationPrevalence = sf.reputationPrevalence;
+      ce.signingStatus = sf.signingStatus;
+      ce.signerId = sf.signerId;
+      ce.confidencePct = sf.confidencePct;
+      localCache.append(std::move(ce));
+    } else {
+      // File is clean – record for incremental-scan cache.
+      CacheEntry ce;
+      ce.filePath = item.filePath;
+      ce.lastModifiedMs = item.lastModifiedMs;
+      ce.lastModified = QDateTime::fromMSecsSinceEpoch(item.lastModifiedMs).toString(Qt::ISODate);
+      ce.fileSize = item.fileSize;
+      ce.isFlagged = false;
+      localCache.append(std::move(ce));
+    }
+
+    // P7: flush local cache in batches to limit per-worker memory growth
+    // and reduce the cost of the final merge lock.
+    if (localCache.size() >= 500)
+      flushLocalCache();
+  }
+
+  // Final flush – remaining entries not yet merged.
+  flushLocalCache();
 }

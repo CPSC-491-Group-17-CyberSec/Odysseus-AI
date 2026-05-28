@@ -24,9 +24,9 @@
 // Thread safety: fully reentrant — no shared mutable state.
 // ============================================================================
 
-#include <vector>
-#include <string>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 /// Total EMBER feature vector dimensionality.
 static constexpr int kEmberFeatureCount = 2381;
